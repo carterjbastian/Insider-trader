@@ -9,8 +9,13 @@ from insider_trader.context import summarize_history
 
 def _row(ticker, sector, ttype, ddate, delay):
     return {
-        "ticker": ticker, "sector": sector, "txn_type": ttype,
-        "disclosure_date": ddate, "delay_days": delay, "amount_low": 1001, "amount_high": 15000,
+        "ticker": ticker,
+        "sector": sector,
+        "txn_type": ttype,
+        "disclosure_date": ddate,
+        "delay_days": delay,
+        "amount_low": 1001,
+        "amount_high": 15000,
     }
 
 

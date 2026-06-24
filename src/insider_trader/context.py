@@ -74,8 +74,15 @@ def _prior_trades(conn, bioguide: str, as_of: date) -> list[dict]:
             "WHERE f.bioguide=%s AND t.disclosure_date < %s",
             (bioguide, as_of),
         )
-        cols = ["ticker", "sector", "txn_type", "disclosure_date", "delay_days",
-                "amount_low", "amount_high"]
+        cols = [
+            "ticker",
+            "sector",
+            "txn_type",
+            "disclosure_date",
+            "delay_days",
+            "amount_low",
+            "amount_high",
+        ]
         return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
 
 
@@ -96,9 +103,14 @@ def event_context(conn, transaction_id: int) -> dict | None:
     prior = _prior_trades(conn, bioguide, as_of)
     return {
         "event": {
-            "ticker": ticker, "asset": asset, "txn_type": ttype,
-            "txn_date": tdate, "disclosure_date": ddate, "delay_days": delay,
-            "amount_low": lo, "amount_high": hi,
+            "ticker": ticker,
+            "asset": asset,
+            "txn_type": ttype,
+            "txn_date": tdate,
+            "disclosure_date": ddate,
+            "delay_days": delay,
+            "amount_low": lo,
+            "amount_high": hi,
         },
         "member": _member(conn, bioguide),
         "asset_sector": _sector(conn, ticker),
