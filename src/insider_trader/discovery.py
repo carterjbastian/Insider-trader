@@ -109,9 +109,13 @@ def _cap_class(cap: int | None) -> str:
     return "large"
 
 
-def run(conn, min_bump: float = 1.0, lesser_known_max_freq: int = 25) -> dict:
+def run(min_bump: float = 1.0, lesser_known_max_freq: int = 25) -> dict:
+    # Read, then CLOSE the connection — the price fetch takes minutes and Neon kills
+    # a connection left idle-in-transaction. Reconnect only to persist at the end.
+    conn = store.connect()
     purchases = _load_purchases(conn)
     freq = _ticker_frequency(conn)
+    conn.close()
     by_ticker: dict[str, list[tuple]] = defaultdict(list)
     for r in purchases:
         by_ticker[r[2]].append(r)
@@ -158,7 +162,9 @@ def run(conn, min_bump: float = 1.0, lesser_known_max_freq: int = 25) -> dict:
     for r in lesser:
         r["cap"] = caps.get(r["ticker"])
 
+    conn = store.connect()
     _persist(conn, lesser)
+    conn.close()
     return {"analyzed": len(results), "winners": winners, "lesser": lesser}
 
 
@@ -237,7 +243,4 @@ def report(m: dict) -> str:
 
 
 if __name__ == "__main__":
-    conn = store.connect()
-    if conn:
-        print(report(run(conn)))
-        conn.close()
+    print(report(run()))
