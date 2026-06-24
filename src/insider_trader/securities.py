@@ -1,13 +1,16 @@
 """Ticker -> sector/industry enrichment (the other half of the 'access' layer).
 
 Free via yfinance. Lets the analysis generalize "Financial Services member trades a
-bank" to every sector. Resilient: delisted/invalid tickers are recorded as ok=false
-so re-runs skip them. Run as a background job over the ~3k distinct tickers:
+bank" to every sector. Yahoo rate-limits rapid bursts, so we **pace** requests and
+**retry with backoff**; only not-yet-resolved tickers are (re)attempted, so re-runs
+just fill the gaps. Run as a background job:
 
   uv run python -m insider_trader.securities
 """
 
 from __future__ import annotations
+
+import time
 
 from . import store
 
@@ -23,32 +26,35 @@ CREATE TABLE IF NOT EXISTS securities (
 """
 
 
-def fetch_sector(ticker: str) -> dict | None:
-    """Sector/industry/name for a ticker via yfinance, or None if unavailable."""
+def fetch_sector(ticker: str, retries: int = 2) -> dict | None:
+    """Sector/industry/name via yfinance, or None. Retries with backoff to ride out
+    Yahoo rate-limiting (a 3k-request burst gets throttled, producing false misses)."""
     import yfinance as yf
 
-    try:
-        info = yf.Ticker(ticker).info
-    except Exception:  # noqa: BLE001 - yfinance throws many things on bad/delisted symbols
-        return None
-    if not info or not info.get("sector"):
-        return None
-    return {
-        "name": info.get("longName") or info.get("shortName"),
-        "sector": info.get("sector"),
-        "industry": info.get("industry"),
-    }
+    for attempt in range(retries + 1):
+        try:
+            info = yf.Ticker(ticker).info
+        except Exception:  # noqa: BLE001 - yfinance throws many things on bad/throttled symbols
+            info = None
+        if info and info.get("sector"):
+            return {
+                "name": info.get("longName") or info.get("shortName"),
+                "sector": info.get("sector"),
+                "industry": info.get("industry"),
+            }
+        if attempt < retries:
+            time.sleep(2.0 * (attempt + 1))  # back off, then retry
+    return None
 
 
-def enrich(conn, limit: int | None = None, retry_failed: bool = False) -> dict:
-    """Fetch sectors for distinct transaction tickers not already resolved."""
+def enrich(conn, limit: int | None = None, pause: float = 0.4) -> dict:
+    """Resolve sectors for transaction tickers not yet resolved (ok). Paces requests."""
     with conn.cursor() as cur:
         cur.execute(_SCHEMA)
         conn.commit()
         cur.execute("SELECT DISTINCT ticker FROM transactions WHERE ticker IS NOT NULL")
         tickers = {r[0] for r in cur.fetchall()}
-        done_filter = "" if retry_failed else "WHERE ok"
-        cur.execute(f"SELECT ticker FROM securities {done_filter}")
+        cur.execute("SELECT ticker FROM securities WHERE ok")  # already resolved
         done = {r[0] for r in cur.fetchall()}
 
     todo = sorted(tickers - done)
@@ -57,6 +63,8 @@ def enrich(conn, limit: int | None = None, retry_failed: bool = False) -> dict:
     ok = fail = 0
     with conn.cursor() as cur:
         for i, t in enumerate(todo, 1):
+            if pause:
+                time.sleep(pause)
             s = fetch_sector(t)
             cur.execute(
                 "INSERT INTO securities (ticker, name, sector, industry, ok, fetched_at) "
@@ -66,7 +74,7 @@ def enrich(conn, limit: int | None = None, retry_failed: bool = False) -> dict:
                 (t, s and s["name"], s and s["sector"], s and s["industry"], bool(s)),
             )
             ok += bool(s)
-            fail += (not s)
+            fail += not s
             if i % 100 == 0:
                 conn.commit()
                 print(f"  {i}/{len(todo)}  ({ok} ok, {fail} fail)", flush=True)
