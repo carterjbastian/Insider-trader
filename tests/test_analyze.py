@@ -16,7 +16,9 @@ def test_format_context_includes_key_facts():
             "full_name": "Josh Gottheimer", "party": "Democrat", "state": "NJ",
             "chamber": "house", "committees": [{"name": "House Financial Services", "title": None}],
         },
-        "asset_sector": {"name": "Goldman", "sector": "Financial Services", "industry": "Capital Markets"},
+        "asset_sector": {
+            "name": "Goldman", "sector": "Financial Services", "industry": "Capital Markets",
+        },
         "history": {
             "n_prior_trades": 3536, "n_buys": 1476, "n_sells": 2057, "distinct_tickers": 444,
             "times_traded_this_ticker": 6, "top_sectors": [("Technology", 200)],
