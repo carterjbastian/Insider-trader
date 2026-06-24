@@ -233,9 +233,14 @@ def run() -> None:
         ("trader had a prior big-win", lambda r: (r.get("prior_bigwin90") or 0) > 0),
         ("EXCLUDE defensive sectors", lambda r: r.get("sector") not in defensive),
         ("growth + small size", lambda r: r.get("sector") in growth and r["amount_mid"] <= amed),
-        ("growth + small + prior big-win",
-         lambda r: r.get("sector") in growth and r["amount_mid"] <= amed
-         and (r.get("prior_bigwin90") or 0) > 0),
+        (
+            "growth + small + prior big-win",
+            lambda r: (
+                r.get("sector") in growth
+                and r["amount_mid"] <= amed
+                and (r.get("prior_bigwin90") or 0) > 0
+            ),
+        ),
     ]
     total_win = sum(r["win"] for r in rows)
     base = total_win / len(rows)
@@ -247,8 +252,10 @@ def run() -> None:
         if not kept:
             continue
         kw = sum(r["win"] for r in kept)
-        print(f"  {name:<34}{len(kept) / len(rows) * 100:>6.0f}%{kw / len(kept) * 100:>9.1f}%"
-              f"{kw / total_win * 100:>7.0f}%{(kw / len(kept)) / base:>6.1f}")
+        print(
+            f"  {name:<34}{len(kept) / len(rows) * 100:>6.0f}%{kw / len(kept) * 100:>9.1f}%"
+            f"{kw / total_win * 100:>7.0f}%{(kw / len(kept)) / base:>6.1f}"
+        )
     print("=" * 84)
 
 
