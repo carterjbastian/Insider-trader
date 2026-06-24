@@ -50,13 +50,20 @@ def _get(url: str, timeout: int = 60) -> bytes:
     ).read()
 
 
+# Plausible year window for a STOCK-Act-era filing. Dates outside this are typos
+# (in the filing or via OCR) — e.g. "2204", "3031", "1935" — and get dropped to None.
+# Note: a *plausible* multi-year gap (a late/amended filing) is kept — that's signal.
+_MIN_YEAR, _MAX_YEAR = 2008, 2030
+
+
 def _date(s: str | None) -> date | None:
     if not s:
         return None
     try:
-        return datetime.strptime(s.strip(), "%m/%d/%Y").date()
+        d = datetime.strptime(s.strip(), "%m/%d/%Y").date()
     except ValueError:
         return None
+    return d if _MIN_YEAR <= d.year <= _MAX_YEAR else None
 
 
 # --- index ------------------------------------------------------------------

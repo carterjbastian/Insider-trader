@@ -67,3 +67,19 @@ def test_amount_open_ended():
     txt = "SP Big Co (BIG) [ST] P 01/02/2024 01/10/2024 $50,000,000\n"
     t = parse_transactions(txt, "D")[0]
     assert t.amount_low == 50_000_000 and t.amount_high is None
+
+
+def test_implausible_year_dates_dropped_but_trade_kept():
+    # A typo'd disclosure year ("2204") is dropped to None; the trade itself stays.
+    txt = "SP Typo Co (TYP) [ST] P 06/22/2024 06/22/2204 $1,001 - $15,000\n"
+    t = parse_transactions(txt, "D")[0]
+    assert t.ticker == "TYP" and t.txn_date == date(2024, 6, 22)
+    assert t.disclosure_date is None and t.delay_days is None
+
+
+def test_plausible_late_filing_kept():
+    # A 2015 trade disclosed in 2025 is a real late filing — keep it (both years valid).
+    txt = "SP Late Co (LATE) [ST] S 05/08/2015 05/15/2025 $1,001 - $15,000\n"
+    t = parse_transactions(txt, "D")[0]
+    assert t.txn_date == date(2015, 5, 8) and t.disclosure_date == date(2025, 5, 15)
+    assert t.delay_days == (date(2025, 5, 15) - date(2015, 5, 8)).days
