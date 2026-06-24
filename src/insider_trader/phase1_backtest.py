@@ -293,7 +293,8 @@ def _render(act, results) -> str:
             f"**{_pct(r['roi'])}** | {_pct(r['spy_roi'])} | "
             f"{_pct(r['roi'] - r['spy_roi'])} | "
             f"{_pct(r['ret_avg'])} | {_pct(r['exc_avg'])} | {_pct(r['ret_med'])} | "
-            f"{r['win_rate'] * 100:.0f}% | {r['beat_rate'] * 100:.0f}% | {r['pct_open'] * 100:.0f}% |"
+            f"{r['win_rate'] * 100:.0f}% | {r['beat_rate'] * 100:.0f}% | "
+            f"{r['pct_open'] * 100:.0f}% |"
         )
     L += [
         "",
