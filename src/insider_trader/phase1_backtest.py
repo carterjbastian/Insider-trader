@@ -121,12 +121,12 @@ def _last(series):
 # --- simulation -------------------------------------------------------------
 
 
-def _resolve_sell(key, buy_date, member, ticker, ser, sales):
+def _resolve_sell(key, buy_date, bioguide, ticker, ser, sales):
     """Return (sell_date, sell_close) if sold by TODAY, else None (open position)."""
     if key == "hold":
         return None
     if key == "trader":
-        sd = next((s for s in sales.get((member, ticker), []) if s > buy_date), None)
+        sd = next((s for s in sales.get((bioguide, ticker), []) if s > buy_date), None)
         if not sd:
             return None
         hit = _on_after(ser, sd)
@@ -142,7 +142,7 @@ def _simulate(strat_key, bets, prices):
     for b in bets:
         ser = prices[b["ticker"]]
         sell = _resolve_sell(
-            strat_key, b["buy_date"], b["member"], b["ticker"], ser, sales=b["sales"]
+            strat_key, b["buy_date"], b["bioguide"], b["ticker"], ser, sales=b["sales"]
         )
         if sell:
             sell_date, sell_close = sell
@@ -238,6 +238,7 @@ def run(out_path: str = OUT) -> dict:
         bets.append(
             {
                 "member": s["member"],
+                "bioguide": s["bioguide"],
                 "ticker": s["ticker"],
                 "disc": s["disc"],
                 "buy_date": buy[0],
