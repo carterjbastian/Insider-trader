@@ -93,7 +93,13 @@ def _prices(tickers, batch=60):
             except Exception:  # noqa: BLE001
                 continue
             if len(close):
-                out[s] = {ts.date(): float(v) for ts, v in close.items()}
+                ser = {ts.date(): float(v) for ts, v in close.items()}
+                vals = list(ser.values())
+                # drop OTC/illiquid/split-artifact series (a >1000x full-range ratio is a
+                # data error, not a real equity — these blow up long-hold aggregates).
+                if min(vals) <= 0 or max(vals) / min(vals) > 1000:
+                    continue
+                out[s] = ser
         time.sleep(0.5)
         print(f"  prices {min(i + batch, len(syms))}/{len(syms)} ({len(out)} ok)", flush=True)
     return out
@@ -314,9 +320,10 @@ def _render(act, results) -> str:
         "- **total ROI** = (recouped + unsold − invested) / invested. **SPY-alt ROI** = same "
         "$100 bets/sells in SPY. **edge** = strategy ROI − SPY-alt ROI.",
         "- **mkt-adj** return = per-bet return minus SPY over the identical window.",
-        "- Caveats: House-only; survivorship (unpriced/delisted dropped); OTC/illiquid names not "
-        "yet filtered; Phase-1 gate is sector-only (the cleanest rule-out). To be re-validated "
-        "with Senate data. Phase 2 (LLM insider-proximity) is the layer meant to improve on this.",
+        "- Caveats: House-only; survivorship (unpriced/delisted dropped); OTC/illiquid/split-"
+        "artifact tickers excluded (>1000x full-range ratio = bad data); Phase-1 gate is "
+        "sector-only (the cleanest rule-out). To be re-validated with Senate data. Phase 2 "
+        "(LLM insider-proximity) is the layer meant to improve on this.",
     ]
     return "\n".join(L)
 
