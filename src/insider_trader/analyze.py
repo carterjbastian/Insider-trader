@@ -101,16 +101,21 @@ def format_context(ctx: dict) -> str:
     return "\n".join(lines)
 
 
-def score(ctx: dict, model: str = MODEL) -> SuspicionAssessment | None:
-    """Score one disclosure's context. Returns None on a refusal."""
+def score(ctx: dict, model: str = MODEL, use_thinking: bool = True) -> SuspicionAssessment | None:
+    """Score one disclosure's context. Returns None on a refusal.
+
+    ``use_thinking`` adds adaptive thinking (best for live opus scoring); turn it
+    off for cheap/fast bulk scoring (e.g. Haiku, which doesn't take effort/thinking).
+    """
     client = anthropic.Anthropic()
+    extra = {"thinking": {"type": "adaptive"}} if use_thinking else {}
     resp = client.messages.parse(
         model=model,
         max_tokens=4000,
-        thinking={"type": "adaptive"},
         system=SYSTEM,
         messages=[{"role": "user", "content": format_context(ctx)}],
         output_format=SuspicionAssessment,
+        **extra,
     )
     if resp.stop_reason == "refusal":
         return None
@@ -133,14 +138,16 @@ CREATE TABLE IF NOT EXISTS analyses (
 """
 
 
-def analyze_transaction(conn, transaction_id: int, model: str = MODEL) -> tuple | None:
+def analyze_transaction(
+    conn, transaction_id: int, model: str = MODEL, use_thinking: bool = True
+) -> tuple | None:
     """Assemble point-in-time context, score it, persist to `analyses`."""
     import json
 
     ctx = context.event_context(conn, transaction_id)
     if not ctx:
         return None
-    a = score(ctx, model)
+    a = score(ctx, model, use_thinking)
     if not a:
         return None
     with conn.cursor() as cur:
