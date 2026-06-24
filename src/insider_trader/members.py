@@ -8,7 +8,7 @@ the filing) to a bioguide ID, then attach committee seats.
 free membership file is current). For a *recent* trade that's accurate; for an old
 trade it's a proxy (see vault spec 05 §5.5). Flagged, not silently assumed.
 
-  uv run python -m insider_trader.enrich_members
+  uv run python -m insider_trader.members
 """
 
 from __future__ import annotations
