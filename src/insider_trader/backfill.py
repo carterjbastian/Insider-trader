@@ -17,7 +17,11 @@ def run(start: int, end: int, max_per_year: int | None = None) -> None:
     conn = store.connect()
     grand_filings = grand_txns = 0
     for year in range(start, end + 1):
-        filings = house.ptrs(year)
+        try:
+            filings = house.ptrs(year)
+        except Exception as e:  # noqa: BLE001 - a missing/failed year shouldn't kill the run
+            print(f"{year}: index unavailable ({type(e).__name__}: {e}) — skipping")
+            continue
         if max_per_year:
             filings = filings[:max_per_year]
         parsed = empty = txns = 0
