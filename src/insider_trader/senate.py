@@ -119,6 +119,13 @@ def _ttype(s: str) -> str:
     return "purchase" if "purchase" in s else "exchange" if "exchange" in s else "sale"
 
 
+def _clean_ticker(raw: str) -> str | None:
+    """The eFD ticker cell often renders a '--' placeholder then the real symbol on a new
+    line (e.g. '--\\n\\n  AM'). Drop the placeholder/whitespace and take the real token."""
+    parts = [p for p in re.sub(r"\s+", " ", raw or "").split(" ") if p and p != "--"]
+    return parts[-1] if parts else None
+
+
 def parse_ptr(op, doc_id: str, url: str, disclosure: date | None) -> list[Transaction]:
     page = op.open(BASE + url, timeout=40).read().decode("utf-8", "replace")  # noqa: S310
     out: list[Transaction] = []
@@ -128,7 +135,7 @@ def parse_ptr(op, doc_id: str, url: str, disclosure: date | None) -> list[Transa
         # columns: #, txn_date, owner, ticker, asset_name, asset_type, type, amount, comment
         if len(cells) < 8 or not re.match(r"\d\d?/\d\d?/\d{4}", cells[1]):
             continue
-        ticker = cells[3].strip()
+        ticker = _clean_ticker(cells[3])
         lo, hi = _amount(cells[7])
         own = cells[2].strip().lower().split()
         out.append(
@@ -136,7 +143,7 @@ def parse_ptr(op, doc_id: str, url: str, disclosure: date | None) -> list[Transa
                 doc_id=doc_id,
                 owner=_OWNER.get(own[0], "SELF") if own else "SELF",
                 asset_name=re.sub(r"\s+", " ", cells[4]).strip(),
-                ticker=(ticker if ticker and ticker != "--" else None),
+                ticker=ticker,
                 asset_type=cells[5].strip() or None,
                 txn_type=_ttype(cells[6]),
                 txn_date=_date(cells[1]),
