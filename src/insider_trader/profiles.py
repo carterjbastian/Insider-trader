@@ -256,12 +256,11 @@ def profile_markdown(spine: dict, bio) -> str:
     return "\n".join(lines)
 
 
-def build_profile(
-    conn, bioguide: str, model: str = PROFILE_MODEL, idx=None, chist=None
+def compute_profile(
+    bioguide: str, idx: dict, chist: dict, model: str = PROFILE_MODEL
 ) -> dict | None:
-    """Full profile for one member: spine + Wikipedia + Opus summary → persist. Returns the row."""
-    idx = idx if idx is not None else legislator_index()
-    chist = chist if chist is not None else _committee_history()
+    """Network-only profile build (spine + Wikipedia + Opus summary). No DB — thread-safe, so a
+    batch runner can fan these out concurrently and persist on the main thread afterwards."""
     leg = idx.get(bioguide)
     if not leg:
         return None
@@ -269,9 +268,33 @@ def build_profile(
     wiki = wikipedia_text(spine.get("wikipedia"))
     bio = summarize_profile(spine, wiki, model) if wiki else None
     md = profile_markdown(spine, bio)
-    sources = {"wikipedia": spine.get("wikipedia"), "had_wiki": bool(wiki)}
-    save_profile(conn, bioguide, spine, spine.get("wikipedia"), md, sources, model)
-    return {"bioguide": bioguide, "name": spine.get("full_name"), "had_wiki": bool(wiki), "md": md}
+    return {
+        "bioguide": bioguide,
+        "spine": spine,
+        "wikipedia": spine.get("wikipedia"),
+        "profile_md": md,
+        "sources": {"wikipedia": spine.get("wikipedia"), "had_wiki": bool(wiki)},
+        "model": model,
+        "name": spine.get("full_name"),
+    }
+
+
+def build_profile(
+    conn, bioguide: str, model: str = PROFILE_MODEL, idx=None, chist=None
+) -> dict | None:
+    """Full profile for one member: spine + Wikipedia + Opus summary → persist. Returns the row."""
+    idx = idx if idx is not None else legislator_index()
+    chist = chist if chist is not None else _committee_history()
+    p = compute_profile(bioguide, idx, chist, model)
+    if not p:
+        return None
+    save_profile(conn, bioguide, p["spine"], p["wikipedia"], p["profile_md"], p["sources"], model)
+    return {
+        "bioguide": bioguide,
+        "name": p["name"],
+        "had_wiki": p["sources"]["had_wiki"],
+        "md": p["profile_md"],
+    }
 
 
 def build_spines(conn, bioguides: list[str] | None = None) -> dict:

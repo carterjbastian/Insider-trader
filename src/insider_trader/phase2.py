@@ -323,11 +323,146 @@ def ensure_profile(conn, bioguide: str, idx=None, chist=None) -> None:
     profiles.build_profile(conn, bioguide, idx=idx, chist=chist)
 
 
+# --- batch scoring of the locked candidate set ------------------------------
+
+
+def locked_candidates(conn) -> list[dict]:
+    """The LOCKED Phase-1 set with transaction ids + run-up: growth + proven trader +
+    pre-disclosure run-up >= +5%. Mirrors phase1_backtest's growth-proven dedup."""
+    from .phase1_backtest import GROWTH, _on_after, _prices
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT ON (f.bioguide, t.ticker, t.txn_date) "
+            "t.id, f.bioguide, t.ticker, t.txn_date, t.disclosure_date "
+            "FROM transactions t JOIN filings f USING(doc_id) "
+            "JOIN members m ON m.bioguide=f.bioguide "
+            "JOIN securities s ON s.ticker=t.ticker AND s.ok "
+            "JOIN trader_metrics tm ON tm.transaction_id=t.id "
+            "WHERE t.txn_type='purchase' AND t.ticker IS NOT NULL "
+            "AND t.disclosure_date IS NOT NULL "
+            "AND s.sector = ANY(%s) AND tm.prior_bigwin90 > 0 "
+            "ORDER BY f.bioguide, t.ticker, t.txn_date, t.id",
+            (list(GROWTH),),
+        )
+        rows = cur.fetchall()
+    prices = _prices([r[2] for r in rows])
+    out = []
+    for tid, bio, tk, td, dd in rows:
+        ser = prices.get(tk)
+        if not ser:
+            continue
+        b, d = _on_after(ser, td), _on_after(ser, dd)
+        if not b or not d or b[1] <= 0:
+            continue
+        runup = d[1] / b[1] - 1.0
+        if runup >= 0.05:
+            out.append({"tid": tid, "bioguide": bio, "ticker": tk, "runup": runup})
+    return out
+
+
+def _persist(conn, tid, runup, a, usage, prompt_version, model):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO phase2_analyses (transaction_id, prompt_version, model, buy, confidence, "
+            "signal_strength, trader_alpha, reasoning, runup, input_tokens, output_tokens) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT (transaction_id, prompt_version, model) DO UPDATE SET "
+            "buy=EXCLUDED.buy, confidence=EXCLUDED.confidence, "
+            "signal_strength=EXCLUDED.signal_strength, trader_alpha=EXCLUDED.trader_alpha, "
+            "reasoning=EXCLUDED.reasoning, runup=EXCLUDED.runup, created=now()",
+            (
+                tid,
+                prompt_version,
+                model,
+                a.buy,
+                a.confidence,
+                a.signal_strength,
+                a.trader_alpha,
+                a.reasoning,
+                runup,
+                getattr(usage, "input_tokens", None),
+                getattr(usage, "output_tokens", None),
+            ),
+        )
+    conn.commit()
+
+
+def score_all(conn, workers: int = 8, model: str = MODEL, prompt_version: str = PROMPT_VERSION):
+    """Full run: build every needed member profile (concurrent), then score every locked
+    candidate (concurrent). Idempotent — skips profiles/analyses already present, so it resumes.
+    DB access stays on the main thread; only network calls are fanned out."""
+    import concurrent.futures as cf
+
+    cands = locked_candidates(conn)
+    print(f"[score_all] {len(cands)} locked candidates", flush=True)
+
+    # 1) member profiles (build the missing ones; network concurrent, save serial)
+    idx, chist = profiles.legislator_index(), profiles._committee_history()
+    with conn.cursor() as cur:
+        cur.execute("SELECT bioguide FROM member_profiles WHERE profile_md IS NOT NULL")
+        have = {r[0] for r in cur.fetchall()}
+    need = sorted({c["bioguide"] for c in cands} - have)
+    print(f"[score_all] building {len(need)} member profiles...", flush=True)
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        for p in ex.map(lambda b: profiles.compute_profile(b, idx, chist), need):
+            if p:
+                profiles.save_profile(
+                    conn,
+                    p["bioguide"],
+                    p["spine"],
+                    p["wikipedia"],
+                    p["profile_md"],
+                    p["sources"],
+                    p["model"],
+                )
+    print("[score_all] profiles done", flush=True)
+
+    # 2) which candidates still need scoring at this prompt_version + model
+    with conn.cursor() as cur:
+        cur.execute(_SCHEMA)
+        conn.commit()
+        cur.execute(
+            "SELECT transaction_id FROM phase2_analyses WHERE prompt_version=%s AND model=%s",
+            (prompt_version, model),
+        )
+        scored = {r[0] for r in cur.fetchall()}
+    todo = [c for c in cands if c["tid"] not in scored]
+    print(
+        f"[score_all] scoring {len(todo)} (skipping {len(cands) - len(todo)} already done)...",
+        flush=True,
+    )
+
+    # 3) build dossiers serially (DB), score concurrently (network), persist serially (DB)
+    dossiers = [(c, build_dossier(conn, c["tid"], c["runup"])) for c in todo]
+
+    def _do(item):
+        c, dos = item
+        if not dos:
+            return c, None, None
+        a, usage = score(dos["text"], model)
+        return c, a, usage
+
+    done = 0
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        for c, a, usage in ex.map(_do, dossiers):
+            if a:
+                _persist(conn, c["tid"], c["runup"], a, usage, prompt_version, model)
+            done += 1
+            if done % 25 == 0:
+                print(f"[score_all] {done}/{len(todo)} scored", flush=True)
+    print(f"[score_all] complete: {done} scored", flush=True)
+    return {"candidates": len(cands), "profiles_built": len(need), "scored": done}
+
+
 if __name__ == "__main__":
     import sys
 
     conn = store.connect()
-    if conn and len(sys.argv) > 1:
+    if conn and len(sys.argv) > 1 and sys.argv[1] == "all":
+        print(score_all(conn))
+        conn.close()
+    elif conn and len(sys.argv) > 1:
         tid = int(sys.argv[1])
         with conn.cursor() as cur:
             cur.execute(
