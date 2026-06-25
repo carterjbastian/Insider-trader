@@ -95,7 +95,7 @@ _LOCKED_OUT = _BTDIR + "2026-06-25 Phase 1 LOCKED — Full Backtest.md"
 # --- data -------------------------------------------------------------------
 
 
-def _load(conn, gate="exclude-defensive"):
+def _load(conn, gate="exclude-defensive", chamber=None):
     base = (
         "SELECT DISTINCT ON (f.bioguide, t.ticker, t.txn_date) "
         "f.bioguide, m.full_name, t.ticker, s.sector, t.disclosure_date, t.txn_date "
@@ -107,6 +107,8 @@ def _load(conn, gate="exclude-defensive"):
         "WHERE t.txn_type='purchase' AND t.ticker IS NOT NULL "
         "AND t.disclosure_date IS NOT NULL AND s.sector IS NOT NULL "
     )
+    # House filings carry chamber=NULL (legacy), Senate carry 'senate'.
+    ch = {"senate": "AND f.chamber = 'senate' ", "house": "AND f.chamber IS NULL "}.get(chamber, "")
     order = "ORDER BY f.bioguide, t.ticker, t.txn_date, t.id"
     with conn.cursor() as cur:
         if gate in ("high-precision", "growth-proven"):
@@ -116,6 +118,7 @@ def _load(conn, gate="exclude-defensive"):
                 base
                 + "JOIN trader_metrics tm ON tm.transaction_id=t.id "
                 + common
+                + ch
                 + "AND s.sector = ANY(%s) "
                 + size
                 + "AND tm.prior_bigwin90 > 0 "
@@ -123,7 +126,7 @@ def _load(conn, gate="exclude-defensive"):
                 (list(GROWTH),),
             )
         else:
-            cur.execute(base + common + "AND s.sector <> ALL(%s) " + order, (list(DEFENSIVE),))
+            cur.execute(base + common + ch + "AND s.sector <> ALL(%s) " + order, (list(DEFENSIVE),))
         sigs = [
             dict(
                 zip(["bioguide", "member", "ticker", "sector", "disc", "txn_date"], r, strict=True)
@@ -837,14 +840,24 @@ def _downside(strat_key, bets, prices, quarters):
 # --- LOCKED full report -----------------------------------------------------
 
 
-def run_locked(out_path=None) -> dict:
+_SCOPES = {None: "House + Senate", "house": "House only", "senate": "Senate only"}
+_SCOPE_OUT = {
+    None: _BTDIR + "2026-06-25 Phase 1 LOCKED — House+Senate.md",
+    "house": _LOCKED_OUT,
+    "senate": _BTDIR + "2026-06-25 Phase 1 LOCKED — Senate Only.md",
+}
+
+
+def run_locked(chamber=None, out_path=None) -> dict:
     """Canonical, full backtest of the LOCKED Phase-1 filter: summary + topline + detail +
-    per-year edge + downside/drawdown + longitudinal (annual & quarterly)."""
-    out_path = out_path or _LOCKED_OUT
+    per-year edge + downside/drawdown + longitudinal (annual & quarterly). `chamber` scopes
+    the universe: None = House+Senate, 'house' = House only, 'senate' = Senate only."""
+    scope = _SCOPES[chamber]
+    out_path = out_path or _SCOPE_OUT[chamber]
     conn = store.connect()
-    sigs, sales = _load(conn, "growth-proven")
+    sigs, sales = _load(conn, "growth-proven", chamber)
     conn.close()
-    print(f"[locked] {len(sigs)} growth-proven signals; fetching prices...", flush=True)
+    print(f"[locked:{scope}] {len(sigs)} growth-proven signals; fetching prices...", flush=True)
     prices = _prices([s["ticker"] for s in sigs])
 
     allbets = _build_bets(sigs, sales, prices)
@@ -858,12 +871,12 @@ def run_locked(out_path=None) -> dict:
     quarterly = {n: _longitudinal(k, bets, prices, "quarter", first_buy) for n, k in strats}
     downside = {n: _downside(k, bets, prices, quarterly[n]) for n, k in strats}
 
-    md = _render_locked(activity, results, annual, quarterly, downside, strats, len(allbets))
+    md = _render_locked(activity, results, annual, quarterly, downside, strats, len(allbets), scope)
     with open(out_path, "w") as f:
         f.write(md)
     print(f"\nwrote {out_path}\n")
     print(md)
-    return {"activity": activity, "results": results}
+    return {"scope": scope, "activity": activity, "results": results}
 
 
 def _long_table(rows):
@@ -880,7 +893,9 @@ def _long_table(rows):
     return L
 
 
-def _render_locked(act, results, annual, quarterly, downside, strats, n_core) -> str:
+def _render_locked(
+    act, results, annual, quarterly, downside, strats, n_core, scope="House + Senate"
+) -> str:
     names = [n for n, _ in strats]
     hp = results["1-year"]
     L = [
@@ -890,10 +905,12 @@ def _render_locked(act, results, annual, quarterly, downside, strats, n_core) ->
         "track: Insider Trader",
         "status: canonical",
         f"created: {datetime.now().strftime('%m-%d-%Y')}",
+        f"scope: {scope}",
         "---",
-        "# Insider Trader — Phase 1 LOCKED: Full Backtest",
+        f"# Insider Trader — Phase 1 LOCKED: Full Backtest ({scope})",
         "",
-        f"> {_LOCKED_DESC} $100 bought at the close on/after the **disclosure date**; compared "
+        f"> **Universe: {scope}.** {_LOCKED_DESC} $100 bought at the close on/after the "
+        "**disclosure date**; compared "
         "to the same $100 in **SPY** on the same dates. Look-ahead-safe; open positions marked "
         f"to market as of {TODAY}. The 3 sell rules below are the **locked candidates** (we pick "
         "one before paper trading). See [[../Phase 1 Strategy (Locked)]] and [[../Backtesting "
@@ -994,6 +1011,10 @@ if __name__ == "__main__":
     elif arg == "nosize":
         run_nosize()
     elif arg == "locked":
-        run_locked()
+        run_locked()  # House + Senate combined (DB now holds both)
+    elif arg == "locked-house":
+        run_locked("house")
+    elif arg == "locked-senate":
+        run_locked("senate")
     else:
         run(arg)
