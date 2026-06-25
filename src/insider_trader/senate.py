@@ -17,6 +17,7 @@ than bypass it. Lands in the SAME Neon filings/transactions tables as the House 
 
 from __future__ import annotations
 
+import html
 import http.cookiejar
 import re
 import urllib.parse
@@ -119,9 +120,9 @@ def _ttype(s: str) -> str:
 
 
 def parse_ptr(op, doc_id: str, url: str, disclosure: date | None) -> list[Transaction]:
-    html = op.open(BASE + url, timeout=40).read().decode("utf-8", "replace")  # noqa: S310
+    page = op.open(BASE + url, timeout=40).read().decode("utf-8", "replace")  # noqa: S310
     out: list[Transaction] = []
-    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.S):
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", page, re.S):
         tds = re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S)
         cells = [html.unescape(re.sub("<[^>]+>", "", c)).strip() for c in tds]
         # columns: #, txn_date, owner, ticker, asset_name, asset_type, type, amount, comment
