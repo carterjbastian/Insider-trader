@@ -52,7 +52,10 @@ def build_rosters() -> tuple[dict, dict]:
     name_index: last_norm -> list of candidate dicts (bioguide, first_norms, states, …).
     member_meta: bioguide -> {last, first, full_name, party, chamber, state, committees}.
     """
-    legislators = _get("legislators-current.json") + _get("legislators-historical.json")
+    cur_legs = _get("legislators-current.json")
+    legislators = [(leg, True) for leg in cur_legs] + [
+        (leg, False) for leg in _get("legislators-historical.json")
+    ]
     membership = _get("committee-membership-current.json")
     committees = {
         c.get("thomas_id") or c.get("type", "") + c.get("name", ""): c["name"]
@@ -70,7 +73,7 @@ def build_rosters() -> tuple[dict, dict]:
 
     name_index: dict[str, list[dict]] = {}
     member_meta: dict[str, dict] = {}
-    for leg in legislators:
+    for leg, is_current in legislators:
         nm, ids, terms = leg["name"], leg["id"], leg.get("terms", [])
         if not terms:
             continue
@@ -82,10 +85,17 @@ def build_rosters() -> tuple[dict, dict]:
         }
         firsts.discard("")
         states = {t.get("state") for t in terms if t.get("state")}
+        chambers = {"senate" if t.get("type") == "sen" else "house" for t in terms if t.get("type")}
         last_term = terms[-1]
         bio = ids["bioguide"]
         name_index.setdefault(_last_norm(last), []).append(
-            {"bioguide": bio, "first_norms": firsts, "states": states}
+            {
+                "bioguide": bio,
+                "first_norms": firsts,
+                "states": states,
+                "chambers": chambers,
+                "current": is_current,
+            }
         )
         member_meta[bio] = {
             "last": last,
@@ -99,20 +109,31 @@ def build_rosters() -> tuple[dict, dict]:
     return name_index, member_meta
 
 
-def match(last: str, first: str, state: str, name_index: dict) -> str | None:
-    """Best bioguide for a filer, disambiguating by state then first name."""
+def match(
+    last: str, first: str, state: str, name_index: dict, chamber: str | None = None
+) -> str | None:
+    """Best bioguide for a filer. Disambiguate by state (when known), then the filing's
+    chamber, then first name, then prefer a currently-serving legislator. Senate filers lack
+    a state and the eFD uses nicknames/legal names inconsistently, so chamber + current-term
+    preference does the heavy lifting there."""
     cands = name_index.get(_last_norm(last))
     if not cands:
         return None
     pool = [c for c in cands if state in c["states"]] or cands
+    if chamber:  # a Senate filing should match a senator, not a same-named representative
+        pool = [c for c in pool if chamber in c["chambers"]] or pool
     if len(pool) == 1:
         return pool[0]["bioguide"]
     # disambiguate by first name (the eFD often gives "A. Mitchell" — try each token)
     toks = [_norm(t) for t in first.split() if _norm(t)]
     narrowed = [c for c in pool if any(t in c["first_norms"] for t in toks)]
-    if len(narrowed) == 1:
-        return narrowed[0]["bioguide"]
-    return None  # ambiguous -> leave unmatched
+    cand = narrowed or pool
+    if len(cand) == 1:
+        return cand[0]["bioguide"]
+    currents = [c for c in cand if c["current"]]  # the filer is in office now -> prefer current
+    if len(currents) == 1:
+        return currents[0]["bioguide"]
+    return None  # still ambiguous -> leave unmatched
 
 
 # --- persistence ------------------------------------------------------------
@@ -136,23 +157,24 @@ def enrich(conn) -> dict:
     name_index, meta = build_rosters()
 
     with conn.cursor() as cur:
-        cur.execute("SELECT DISTINCT last, first, state_dst FROM filings")
+        cur.execute("SELECT DISTINCT last, first, state_dst, chamber FROM filings")
         filers = cur.fetchall()
 
     matched_bios: set[str] = set()
     n_matched = 0
     with conn.cursor() as cur:
-        for last, first, state_dst in filers:
+        for last, first, state_dst, chamber in filers:
             m_st = re.match(r"[A-Za-z]{2}", state_dst or "")
             state = m_st.group(0).upper() if m_st else ""
-            bio = match(last or "", first or "", state, name_index)
+            bio = match(last or "", first or "", state, name_index, chamber)
             if not bio:
                 continue
             n_matched += 1
             matched_bios.add(bio)
             cur.execute(
-                "UPDATE filings SET bioguide=%s WHERE last=%s AND first=%s AND state_dst=%s",
-                (bio, last, first, state_dst),
+                "UPDATE filings SET bioguide=%s WHERE last=%s AND first=%s AND state_dst=%s "
+                "AND chamber IS NOT DISTINCT FROM %s",
+                (bio, last, first, state_dst, chamber),
             )
         for bio in matched_bios:
             m = meta[bio]
