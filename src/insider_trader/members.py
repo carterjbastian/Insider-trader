@@ -32,6 +32,17 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z]", "", (s or "").lower())
 
 
+_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+
+
+def _last_norm(last: str) -> str:
+    """Normalize a last name, dropping name suffixes the eFD packs into the last-name
+    field (e.g. 'McConnell, Jr.' -> 'mcconnell'). Multi-word last names are joined."""
+    parts = [p for p in re.split(r"[,\s]+", (last or "").strip()) if p]
+    kept = [p for p in parts if _norm(p) and _norm(p) not in _SUFFIXES]
+    return _norm("".join(kept))
+
+
 # --- roster + committee index ----------------------------------------------
 
 
@@ -73,7 +84,7 @@ def build_rosters() -> tuple[dict, dict]:
         states = {t.get("state") for t in terms if t.get("state")}
         last_term = terms[-1]
         bio = ids["bioguide"]
-        name_index.setdefault(_norm(last), []).append(
+        name_index.setdefault(_last_norm(last), []).append(
             {"bioguide": bio, "first_norms": firsts, "states": states}
         )
         member_meta[bio] = {
@@ -90,14 +101,15 @@ def build_rosters() -> tuple[dict, dict]:
 
 def match(last: str, first: str, state: str, name_index: dict) -> str | None:
     """Best bioguide for a filer, disambiguating by state then first name."""
-    cands = name_index.get(_norm(last))
+    cands = name_index.get(_last_norm(last))
     if not cands:
         return None
     pool = [c for c in cands if state in c["states"]] or cands
     if len(pool) == 1:
         return pool[0]["bioguide"]
-    fn = _norm(first.split()[0]) if first.split() else ""
-    narrowed = [c for c in pool if fn and fn in c["first_norms"]]
+    # disambiguate by first name (the eFD often gives "A. Mitchell" — try each token)
+    toks = [_norm(t) for t in first.split() if _norm(t)]
+    narrowed = [c for c in pool if any(t in c["first_norms"] for t in toks)]
     if len(narrowed) == 1:
         return narrowed[0]["bioguide"]
     return None  # ambiguous -> leave unmatched
