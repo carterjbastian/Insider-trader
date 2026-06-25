@@ -96,23 +96,15 @@ def _held_at(bets, prices, d):
 
 
 def _spy_at(bets, prices, d):
-    """What the same dollars would be worth in SPY, marked at d (open) or at exit (realized)."""
+    """Fair benchmark: the PERSONAL contributions (1× base, no matching leverage — the matching
+    comes from recouped gains, not your pocket) invested in SPY at each buy date, marked at d."""
     spy = prices["SPY"]
+    sx_now = (_on_after(spy, d) or _last(spy))[1]
     tot = 0.0
     for b in bets:
         if "mult" not in b or b["buy_date"] > d:
             continue
-        # equity sleeve
-        er = b["eq_recoup"]
-        ex = er[0] if (er and er[0] <= d) else min(d, TODAY)
-        sx = _on_after(spy, ex) or _last(spy)
-        tot += b["mult"] * b["equity_bet"] * (sx[1] / b["spy_buy"])
-        o = b.get("opt")
-        if o:
-            orc = b["opt_recoup"]
-            ox = orc[0] if (orc and orc[0] <= d) else min(d, TODAY)
-            sox = _on_after(spy, ox) or _last(spy)
-            tot += b["mult"] * o["spend"] * (sox[1] / b["spy_buy"])
+        tot += b["base_spend"] * (sx_now / b["spy_buy"])
     return tot
 
 
