@@ -404,8 +404,16 @@ def score_all(conn, workers: int = 8, model: str = MODEL, prompt_version: str = 
         have = {r[0] for r in cur.fetchall()}
     need = sorted({c["bioguide"] for c in cands} - have)
     print(f"[score_all] building {len(need)} member profiles...", flush=True)
-    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
-        for p in ex.map(lambda b: profiles.compute_profile(b, idx, chist), need):
+
+    def _profile(b):  # never raise — a failed member is skipped, not fatal to the batch
+        try:
+            return profiles.compute_profile(b, idx, chist)
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! profile {b} failed: {type(e).__name__}: {e}", flush=True)
+            return None
+
+    with cf.ThreadPoolExecutor(max_workers=min(5, workers)) as ex:  # gentle on Wikipedia
+        for p in ex.map(_profile, need):
             if p:
                 profiles.save_profile(
                     conn,
@@ -440,7 +448,11 @@ def score_all(conn, workers: int = 8, model: str = MODEL, prompt_version: str = 
         c, dos = item
         if not dos:
             return c, None, None
-        a, usage = score(dos["text"], model)
+        try:
+            a, usage = score(dos["text"], model)
+        except Exception as e:  # noqa: BLE001 — isolate a bad call; idempotent resume catches it
+            print(f"  ! score tid={c['tid']} failed: {type(e).__name__}: {e}", flush=True)
+            return c, None, None
         return c, a, usage
 
     done = 0

@@ -17,8 +17,6 @@ reused across all of that member's trades. Two layers:
 from __future__ import annotations
 
 import json
-import urllib.parse
-import urllib.request
 
 from . import store
 from .members import _get  # cached congress-legislators fetch
@@ -109,8 +107,13 @@ def build_spine(leg: dict, committees: list[dict] | None = None) -> dict:
     }
 
 
-def wikipedia_text(title: str | None, max_chars: int = 24000) -> str | None:
-    """Plain-text extract of a member's Wikipedia article (intro + body)."""
+def wikipedia_text(title: str | None, max_chars: int = 24000, retries: int = 4) -> str | None:
+    """Plain-text extract of a member's Wikipedia article. Retries with backoff on 429/transient
+    errors and returns None on persistent failure (never raises — a missing narrative just yields
+    a spine-only profile rather than killing a batch run)."""
+    import time
+    import urllib.error
+
     if not title:
         return None
     q = urllib.parse.urlencode(
@@ -124,12 +127,19 @@ def wikipedia_text(title: str | None, max_chars: int = 24000) -> str | None:
         }
     )
     req = urllib.request.Request(_WIKI_API + "?" + q, headers={"User-Agent": _UA})
-    with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310 (trusted host)
-        data = json.load(r)
-    for p in data.get("query", {}).get("pages", {}).values():
-        ext = p.get("extract")
-        if ext:
-            return ext[:max_chars]
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310 (trusted host)
+                data = json.load(r)
+            for p in data.get("query", {}).get("pages", {}).values():
+                ext = p.get("extract")
+                if ext:
+                    return ext[:max_chars]
+            return None
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if attempt >= retries:
+                return None
+            time.sleep(1.5 * (attempt + 1))  # back off (Wikipedia 429s under concurrency)
     return None
 
 
