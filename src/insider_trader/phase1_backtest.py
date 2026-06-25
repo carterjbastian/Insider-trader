@@ -55,6 +55,21 @@ GATES = {
 # couldn't capture). Thresholds chosen as round levels spanning the run-up distribution.
 MISSED_THRESHOLDS = [0.05, 0.10, 0.20, 0.30, 0.50]
 _MISSED_OUT = _BTDIR + "2026-06-25 Phase 1 Missed-Action Sweep.md"
+# Directional cohorts: high-precision AND the pre-disclosure move falls in a band. Tests the
+# inverse of the missed-action idea — does momentum (buy run-ups) or dip-buying (buy declines)
+# beat buying everything? Each is a stand-alone INCLUSION filter, not a cumulative exclusion.
+COHORTS = [
+    ("ran up >= +20%", lambda g: g >= 0.20),
+    ("ran up >= +10%", lambda g: g >= 0.10),
+    ("ran up >= +5%", lambda g: g >= 0.05),
+    ("any run-up (> 0%)", lambda g: g > 0),
+    ("flat (-5%..+5%)", lambda g: -0.05 <= g <= 0.05),
+    ("any decline (< 0%)", lambda g: g < 0),
+    ("fell <= -5%", lambda g: g <= -0.05),
+    ("fell <= -10%", lambda g: g <= -0.10),
+    ("fell <= -20%", lambda g: g <= -0.20),
+]
+_DIR_OUT = _BTDIR + "2026-06-25 Phase 1 Run-up Direction Cohorts.md"
 
 
 # --- data -------------------------------------------------------------------
@@ -343,6 +358,32 @@ def run_missed_action(thresholds=None, out_path=None) -> dict:
     return {"n": len(bets), "gaps": gaps, "baseline": baseline, "variants": variants}
 
 
+def run_directional(out_path=None) -> dict:
+    """Inversion of the missed-action test: does buying ONLY run-ups (momentum) or ONLY
+    declines (dip-buying) beat buying every high-precision signal?"""
+    out_path = out_path or _DIR_OUT
+    conn = store.connect()
+    sigs, sales = _load(conn, "high-precision")
+    conn.close()
+    print(f"[directional] {len(sigs)} high-precision signals; fetching prices...", flush=True)
+    prices = _prices([s["ticker"] for s in sigs])
+
+    bets = _build_bets(sigs, sales, prices)
+    classifiable = [b for b in bets if b["gap"] is not None]
+    baseline = _sims(bets, prices)
+    cohorts = []  # (label, n, results-or-None)
+    for label, pred in COHORTS:
+        c = [b for b in classifiable if pred(b["gap"])]
+        cohorts.append((label, len(c), _sims(c, prices) if c else None))
+
+    md = _render_directional(len(bets), len(classifiable), baseline, cohorts)
+    with open(out_path, "w") as f:
+        f.write(md)
+    print(f"\nwrote {out_path}\n")
+    print(md)
+    return {"baseline": baseline, "cohorts": cohorts}
+
+
 # --- markdown report --------------------------------------------------------
 
 
@@ -499,11 +540,81 @@ def _render_missed(n_bets, gaps, n_unknown, baseline, variants) -> str:
     return "\n".join(L)
 
 
+def _edge(r):
+    return r["roi"] - r["spy_roi"]
+
+
+def _render_directional(n_bets, n_class, baseline, cohorts) -> str:
+    L = [
+        "---",
+        "type: backtest",
+        "epic: Black Box",
+        "track: Insider Trader",
+        f"created: {datetime.now().strftime('%m-%d-%Y')}",
+        "---",
+        "# Insider Trader — Phase 1: Pre-Disclosure Move Direction Cohorts",
+        "",
+        "> **Base gate:** high-precision. **Question:** instead of *excluding* run-ups, what if "
+        "we INCLUDE-ONLY trades whose ticker moved a certain way between the member's purchase "
+        "and the disclosure? Each row below is a stand-alone inclusion filter (momentum = buy "
+        "run-ups; dip = buy declines). $100/bet, all 7 sell rules, vs SPY on the same dates. "
+        f"Look-ahead-safe; marked-to-market as of {TODAY}.",
+        "",
+        f"- {n_class} of {n_bets} high-precision bets have a measurable purchase->disclosure move.",
+        f"- Baseline (buy everything) 1-yr edge: **{_pct(_edge(baseline['1-year']))}**, "
+        f"buy&hold edge: **{_pct(_edge(baseline['buy & hold']))}**.",
+        "",
+        "## Market-adjusted EDGE vs SPY, by cohort x sell strategy",
+        "_Cell = strategy ROI - SPY-alt ROI. **N** = bets in the cohort (small N = noisy)._",
+        "",
+        "| cohort | N | " + " | ".join(name for name, _ in STRATS) + " |",
+        "|---|--:|" + "--:|" * len(STRATS),
+    ]
+    b_cells = " | ".join(f"**{_pct(_edge(baseline[name]))}**" for name, _ in STRATS)
+    L.append(f"| **baseline (all)** | {n_bets} | {b_cells} |")
+    for label, n, res in cohorts:
+        if not res:
+            L.append(f"| {label} | {n} | " + " | ".join("-" for _ in STRATS) + " |")
+            continue
+        cells = " | ".join(_pct(_edge(res[name])) for name, _ in STRATS)
+        L.append(f"| {label} | {n} | {cells} |")
+
+    L += [
+        "",
+        "## Total ROI, by cohort x sell strategy",
+        "| cohort | N | " + " | ".join(name for name, _ in STRATS) + " |",
+        "|---|--:|" + "--:|" * len(STRATS),
+    ]
+    b_cells = " | ".join(f"**{_pct(baseline[name]['roi'])}**" for name, _ in STRATS)
+    L.append(f"| **baseline (all)** | {n_bets} | {b_cells} |")
+    for label, n, res in cohorts:
+        if not res:
+            L.append(f"| {label} | {n} | " + " | ".join("-" for _ in STRATS) + " |")
+            continue
+        cells = " | ".join(_pct(res[name]["roi"]) for name, _ in STRATS)
+        L.append(f"| {label} | {n} | {cells} |")
+
+    L += [
+        "",
+        "## Read",
+        "- Compare each cohort's edge to the baseline row. If run-up cohorts beat baseline and "
+        "decline cohorts trail it, momentum is real (and the missed-action filter was exactly "
+        "backwards). If declines win, dip-buying insider names is the better entry.",
+        "- Mind **N**: the deep-run-up and deep-decline tails are small and their edges are "
+        "noisy — treat them as directional hints, not precise estimates.",
+        "- Same caveats as the other Phase-1 backtests (House-only, survivorship-pruned, "
+        "OTC/split-artifact excluded). To be re-validated with Senate data.",
+    ]
+    return "\n".join(L)
+
+
 if __name__ == "__main__":
     import sys
 
     arg = sys.argv[1] if len(sys.argv) > 1 else "high-precision"
     if arg == "missed-action":
         run_missed_action()
+    elif arg == "directional":
+        run_directional()
     else:
         run(arg)
