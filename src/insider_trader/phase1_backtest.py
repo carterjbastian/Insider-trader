@@ -70,6 +70,17 @@ COHORTS = [
     ("fell <= -20%", lambda g: g <= -0.20),
 ]
 _DIR_OUT = _BTDIR + "2026-06-25 Phase 1 Run-up Direction Cohorts.md"
+# No-size experiment: drop the small-position cap (growth + proven trader only), crossed with
+# baseline + run-up action filters, scored on the 3 sell strategies that matter most.
+NOSIZE_ACTIONS = [
+    ("baseline (all)", lambda g: True),
+    ("any run-up (> 0%)", lambda g: g is not None and g > 0),
+    ("ran up >= +5%", lambda g: g is not None and g >= 0.05),
+    ("ran up >= +10%", lambda g: g is not None and g >= 0.10),
+    ("ran up >= +20%", lambda g: g is not None and g >= 0.20),
+]
+NOSIZE_SELL = ["1-year", "sell-when-trader-sells", "buy & hold"]
+_NOSIZE_OUT = _BTDIR + "2026-06-25 Phase 1 No-Size-Cap x Run-up.md"
 
 
 # --- data -------------------------------------------------------------------
@@ -89,13 +100,17 @@ def _load(conn, gate="exclude-defensive"):
     )
     order = "ORDER BY f.bioguide, t.ticker, t.txn_date, t.id"
     with conn.cursor() as cur:
-        if gate == "high-precision":
+        if gate in ("high-precision", "growth-proven"):
+            # growth-proven = high-precision WITHOUT the small-position cap
+            size = "AND t.amount_high <= 15000 " if gate == "high-precision" else ""
             cur.execute(
                 base
                 + "JOIN trader_metrics tm ON tm.transaction_id=t.id "
                 + common
-                + "AND s.sector = ANY(%s) AND t.amount_high <= 15000 "
-                "AND tm.prior_bigwin90 > 0 " + order,
+                + "AND s.sector = ANY(%s) "
+                + size
+                + "AND tm.prior_bigwin90 > 0 "
+                + order,
                 (list(GROWTH),),
             )
         else:
@@ -300,8 +315,8 @@ def _build_bets(sigs, sales, prices):
     return bets
 
 
-def _sims(bets, prices):
-    return {name: _agg(_simulate(key, bets, prices)) for name, key in STRATS}
+def _sims(bets, prices, strats=None):
+    return {name: _agg(_simulate(key, bets, prices)) for name, key in (strats or STRATS)}
 
 
 def run(gate: str = "high-precision", out_path: str | None = None) -> dict:
@@ -382,6 +397,39 @@ def run_directional(out_path=None) -> dict:
     print(f"\nwrote {out_path}\n")
     print(md)
     return {"baseline": baseline, "cohorts": cohorts}
+
+
+def run_nosize(out_path=None) -> dict:
+    """Drop the small-position cap (growth + proven trader), cross with run-up action filters,
+    scored on the 3 headline sell strategies. Also reports the with-size baseline for contrast."""
+    out_path = out_path or _NOSIZE_OUT
+    conn = store.connect()
+    sigs_ns, sales = _load(conn, "growth-proven")
+    sigs_hp, _ = _load(conn, "high-precision")
+    conn.close()
+    print(
+        f"[no-size] {len(sigs_ns)} growth-proven signals (vs {len(sigs_hp)} with size cap); "
+        "fetching prices...",
+        flush=True,
+    )
+    prices = _prices([s["ticker"] for s in sigs_ns])
+    strats = [(n, k) for n, k in STRATS if n in NOSIZE_SELL]
+
+    bets = _build_bets(sigs_ns, sales, prices)
+    hp_bets = _build_bets(sigs_hp, sales, prices)
+    hp_base = _sims(hp_bets, prices, strats)
+
+    rows = []  # (label, n, results-or-None)
+    for label, pred in NOSIZE_ACTIONS:
+        sub = [b for b in bets if pred(b["gap"])]
+        rows.append((label, len(sub), _sims(sub, prices, strats) if sub else None))
+
+    md = _render_nosize(len(bets), len(hp_bets), hp_base, rows, strats)
+    with open(out_path, "w") as f:
+        f.write(md)
+    print(f"\nwrote {out_path}\n")
+    print(md)
+    return {"n": len(bets), "hp_base": hp_base, "rows": rows}
 
 
 # --- markdown report --------------------------------------------------------
@@ -608,6 +656,68 @@ def _render_directional(n_bets, n_class, baseline, cohorts) -> str:
     return "\n".join(L)
 
 
+def _render_nosize(n_bets, n_hp, hp_base, rows, strats) -> str:
+    names = [n for n, _ in strats]
+    L = [
+        "---",
+        "type: backtest",
+        "epic: Black Box",
+        "track: Insider Trader",
+        f"created: {datetime.now().strftime('%m-%d-%Y')}",
+        "---",
+        "# Insider Trader — Phase 1: No Size Cap x Run-up Filters",
+        "",
+        "> **Gate:** growth sector + PROVEN trader (prior 90-day big-win), **no position-size "
+        "cap** (drops the $1k-$15k bracket that high-precision used). Crossed with a baseline + "
+        "run-up action filters, scored on the 3 headline sell rules. $100/bet, vs SPY on the "
+        f"same dates. Look-ahead-safe; marked-to-market as of {TODAY}.",
+        "",
+        f"- **No-size gate keeps {n_bets} bets** vs **{n_hp}** with the size cap "
+        f"(+{n_bets - n_hp}, {(n_bets / n_hp - 1) * 100:+.0f}%).",
+        "- For contrast, the WITH-size high-precision baseline (no run-up filter): "
+        + ", ".join(f"{n} {_pct(_edge(hp_base[n]))} edge" for n in names)
+        + ".",
+        "",
+        "## Market-adjusted EDGE vs SPY",
+        "_Cell = strategy ROI - SPY-alt ROI. **N** = bets past the filter._",
+        "",
+        "| action filter | N | " + " | ".join(names) + " |",
+        "|---|--:|" + "--:|" * len(names),
+    ]
+    for label, n, res in rows:
+        if not res:
+            L.append(f"| {label} | {n} | " + " | ".join("-" for _ in names) + " |")
+            continue
+        cells = " | ".join(_pct(_edge(res[nm])) for nm in names)
+        bold = "**" if label.startswith("baseline") else ""
+        L.append(f"| {bold}{label}{bold} | {n} | {cells} |")
+
+    L += [
+        "",
+        "## Total ROI",
+        "| action filter | N | " + " | ".join(names) + " |",
+        "|---|--:|" + "--:|" * len(names),
+    ]
+    for label, n, res in rows:
+        if not res:
+            L.append(f"| {label} | {n} | " + " | ".join("-" for _ in names) + " |")
+            continue
+        cells = " | ".join(_pct(res[nm]["roi"]) for nm in names)
+        bold = "**" if label.startswith("baseline") else ""
+        L.append(f"| {bold}{label}{bold} | {n} | {cells} |")
+
+    L += [
+        "",
+        "## Read",
+        "- Compare the no-size **baseline** row's edge to the with-size high-precision numbers "
+        "above: that's the pure cost/benefit of dropping the position-size cap.",
+        "- Then read down the run-up rows: does momentum still lift the edge once the size cap "
+        "is gone, and how many more bets do we keep at each threshold?",
+        "- Same caveats as the other Phase-1 backtests. To be re-validated with Senate data.",
+    ]
+    return "\n".join(L)
+
+
 if __name__ == "__main__":
     import sys
 
@@ -616,5 +726,7 @@ if __name__ == "__main__":
         run_missed_action()
     elif arg == "directional":
         run_directional()
+    elif arg == "nosize":
+        run_nosize()
     else:
         run(arg)
