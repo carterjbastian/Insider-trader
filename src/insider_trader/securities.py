@@ -42,6 +42,11 @@ def fetch_sector(ticker: str, retries: int = 2) -> dict | None:
                 "sector": info.get("sector"),
                 "industry": info.get("industry"),
             }
+        # A clean response that simply lacks a sector (delisted / not-found / fund) is a
+        # DEFINITIVE miss — don't burn backoff retrying it. Only retry when the request threw
+        # (info is None), which is the signature of throttling worth riding out.
+        if info is not None:
+            return None
         if attempt < retries:
             time.sleep(2.0 * (attempt + 1))  # back off, then retry
     return None
