@@ -121,7 +121,7 @@ def match(
         return None
     pool = [c for c in cands if state in c["states"]] or cands
     if chamber:  # a Senate filing should match a senator, not a same-named representative
-        pool = [c for c in pool if chamber in c["chambers"]] or pool
+        pool = [c for c in pool if chamber in (c.get("chambers") or set())] or pool
     if len(pool) == 1:
         return pool[0]["bioguide"]
     # disambiguate by first name (the eFD often gives "A. Mitchell" — try each token)
@@ -130,7 +130,7 @@ def match(
     cand = narrowed or pool
     if len(cand) == 1:
         return cand[0]["bioguide"]
-    currents = [c for c in cand if c["current"]]  # the filer is in office now -> prefer current
+    currents = [c for c in cand if c.get("current")]  # the filer is in office now -> prefer current
     if len(currents) == 1:
         return currents[0]["bioguide"]
     return None  # still ambiguous -> leave unmatched

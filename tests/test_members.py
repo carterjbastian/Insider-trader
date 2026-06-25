@@ -48,3 +48,29 @@ def test_unmatched_returns_none():
         ]
     }
     assert match("A", "Zzz", "TX", idx) is None
+
+
+def test_senate_suffix_and_current_preference():
+    # eFD packs the suffix into the last name and gives no state; the legal first name
+    # ("A. Mitchell") won't match the roster nickname ("Mitch") — current-term preference wins.
+    idx = {
+        "mcconnell": [
+            {"bioguide": "M_OLD", "first_norms": {"john"}, "states": {"KY"},
+             "chambers": {"senate"}, "current": False},
+            {"bioguide": "M000355", "first_norms": {"mitch"}, "states": {"KY"},
+             "chambers": {"senate"}, "current": True},
+        ]
+    }
+    assert match("McConnell, Jr.", "A. Mitchell", "", idx, "senate") == "M000355"
+
+
+def test_chamber_prefers_senator_over_representative():
+    idx = {
+        "scott": [
+            {"bioguide": "REP", "first_norms": {"rick"}, "states": {"GA"},
+             "chambers": {"house"}, "current": True},
+            {"bioguide": "SEN", "first_norms": {"rick"}, "states": {"FL"},
+             "chambers": {"senate"}, "current": True},
+        ]
+    }
+    assert match("Scott", "Rick", "", idx, "senate") == "SEN"
