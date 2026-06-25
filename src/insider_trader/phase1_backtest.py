@@ -81,6 +81,15 @@ NOSIZE_ACTIONS = [
 ]
 NOSIZE_SELL = ["1-year", "sell-when-trader-sells", "buy & hold"]
 _NOSIZE_OUT = _BTDIR + "2026-06-25 Phase 1 No-Size-Cap x Run-up.md"
+# LOCKED Phase-1 strategy (2026-06-25): growth + proven trader (no size cap) + run-up >= +5%.
+# These 3 sell rules are the locked candidates. This produces the canonical, full report.
+LOCKED_RUNUP = 0.05
+LOCKED_SELL = ["1-year", "sell-when-trader-sells", "buy & hold"]
+_LOCKED_DESC = (
+    "**Phase-1 (LOCKED):** growth sector + proven trader (prior 90-day big-win) + the stock "
+    "ran up **>= +5%** between the member's purchase and the disclosure date. No size cap."
+)
+_LOCKED_OUT = _BTDIR + "2026-06-25 Phase 1 LOCKED — Full Backtest.md"
 
 
 # --- data -------------------------------------------------------------------
@@ -180,11 +189,19 @@ def _last(series):
     return k, series[k]
 
 
+def _on_before(series, d):
+    cand = [dd for dd in series if dd <= d]
+    if not cand:
+        return None
+    k = max(cand)
+    return k, series[k]
+
+
 # --- simulation -------------------------------------------------------------
 
 
-def _resolve_sell(key, buy_date, bioguide, ticker, ser, sales):
-    """Return (sell_date, sell_close) if sold by TODAY, else None (open position)."""
+def _resolve_sell(key, buy_date, bioguide, ticker, ser, sales, cap=TODAY):
+    """Return (sell_date, sell_close) if sold by `cap`, else None (open position)."""
     if key == "hold":
         return None
     if key == "trader":
@@ -192,10 +209,10 @@ def _resolve_sell(key, buy_date, bioguide, ticker, ser, sales):
         if not sd:
             return None
         hit = _on_after(ser, sd)
-        return hit if (hit and hit[0] <= TODAY) else None
+        return hit if (hit and hit[0] <= cap) else None
     target = buy_date + timedelta(days=key)  # fixed horizon in days
     hit = _on_after(ser, target)
-    return hit if (hit and hit[0] <= TODAY) else None
+    return hit if (hit and hit[0] <= cap) else None
 
 
 def _simulate(strat_key, bets, prices):
@@ -718,6 +735,254 @@ def _render_nosize(n_bets, n_hp, hp_base, rows, strats) -> str:
     return "\n".join(L)
 
 
+# --- longitudinal (per-period) analysis -------------------------------------
+
+_QEND = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
+
+
+def _period_key(d, period):
+    return (d.year,) if period == "year" else (d.year, (d.month - 1) // 3 + 1)
+
+
+def _period_start(key, period):
+    return date(key[0], 1, 1) if period == "year" else date(key[0], (key[1] - 1) * 3 + 1, 1)
+
+
+def _period_end(key, period):
+    if period == "year":
+        return date(key[0], 12, 31)
+    m, dd = _QEND[key[1]]
+    return date(key[0], m, dd)
+
+
+def _period_label(key, period):
+    return str(key[0]) if period == "year" else f"{key[0]} Q{key[1]}"
+
+
+def _window_row(strat_key, b, prices, pe):
+    """One bet, held within its period and closed/marked at the period end `pe`."""
+    ser = prices[b["ticker"]]
+    sell = _resolve_sell(
+        strat_key, b["buy_date"], b["bioguide"], b["ticker"], ser, b["sales"], cap=pe
+    )
+    if sell:
+        exit_date, exit_close, sold = sell[0], sell[1], True
+    else:
+        mark = _on_before(ser, pe) or _on_after(ser, pe)
+        exit_date, exit_close, sold = mark[0], mark[1], False
+    proceeds = b["shares"] * exit_close
+    spy = prices["SPY"]
+    spy_exit = _on_before(spy, exit_date) or _on_after(spy, exit_date)
+    spy_end = BET * (spy_exit[1] / b["spy_buy"])
+    return sold, proceeds, spy_end
+
+
+def _longitudinal(strat_key, bets, prices, period, first_buy):
+    groups: dict[tuple, list] = {}
+    for b in bets:
+        groups.setdefault(_period_key(b["buy_date"], period), []).append(b)
+    out = []
+    for key in sorted(groups):
+        pe = _period_end(key, period)
+        rows = [_window_row(strat_key, b, prices, pe) for b in groups[key]]
+        n = len(rows)
+        cap_in = BET * n
+        cap_out = sum(p for sold, p, _ in rows if sold)
+        remaining = sum(p for sold, p, _ in rows if not sold)
+        end = cap_out + remaining
+        spy_end = sum(s for _, _, s in rows)
+        complete = pe <= TODAY and _period_start(key, period) >= _period_start(
+            _period_key(first_buy, period), period
+        )
+        out.append(
+            {
+                "label": _period_label(key, period),
+                "n": n,
+                "cap_in": cap_in,
+                "cap_out": cap_out,
+                "remaining": remaining,
+                "roi": end / cap_in - 1,
+                "spy_roi": spy_end / cap_in - 1,
+                "complete": complete,
+            }
+        )
+    return out
+
+
+def _maxdd(returns):
+    """Max peak-to-trough drawdown of an equity curve that compounds each period's ROI."""
+    equity, peak, dd = 1.0, 1.0, 0.0
+    for r in returns:
+        equity *= 1 + r
+        peak = max(peak, equity)
+        dd = max(dd, (peak - equity) / peak)
+    return dd
+
+
+def _downside(strat_key, bets, prices, quarters):
+    rows = _simulate(strat_key, bets, prices)
+    rets = sorted(r["ret"] for r in rows)
+    n = len(rets)
+    qroi = [q["roi"] for q in quarters if q["complete"]]
+    return {
+        "worst_bet": rets[0],
+        "best_bet": rets[-1],
+        "pct_neg": sum(1 for r in rets if r < 0) / n,
+        "pct_halved": sum(1 for r in rets if r <= -0.5) / n,
+        "q_maxdd": _maxdd(qroi),
+        "worst_q": min(qroi) if qroi else None,
+    }
+
+
+# --- LOCKED full report -----------------------------------------------------
+
+
+def run_locked(out_path=None) -> dict:
+    """Canonical, full backtest of the LOCKED Phase-1 filter: summary + topline + detail +
+    per-year edge + downside/drawdown + longitudinal (annual & quarterly)."""
+    out_path = out_path or _LOCKED_OUT
+    conn = store.connect()
+    sigs, sales = _load(conn, "growth-proven")
+    conn.close()
+    print(f"[locked] {len(sigs)} growth-proven signals; fetching prices...", flush=True)
+    prices = _prices([s["ticker"] for s in sigs])
+
+    allbets = _build_bets(sigs, sales, prices)
+    bets = [b for b in allbets if b["gap"] is not None and b["gap"] >= LOCKED_RUNUP]
+    first_buy = min(b["buy_date"] for b in bets)
+    strats = [(n, k) for n, k in STRATS if n in LOCKED_SELL]
+
+    activity = _activity(bets)
+    results = _sims(bets, prices, strats)
+    annual = {n: _longitudinal(k, bets, prices, "year", first_buy) for n, k in strats}
+    quarterly = {n: _longitudinal(k, bets, prices, "quarter", first_buy) for n, k in strats}
+    downside = {n: _downside(k, bets, prices, quarterly[n]) for n, k in strats}
+
+    md = _render_locked(activity, results, annual, quarterly, downside, strats, len(allbets))
+    with open(out_path, "w") as f:
+        f.write(md)
+    print(f"\nwrote {out_path}\n")
+    print(md)
+    return {"activity": activity, "results": results}
+
+
+def _long_table(rows):
+    L = [
+        "| period | trades | capital in | capital out | portfolio left | ROI | mkt-adj ROI |",
+        "|---|--:|--:|--:|--:|--:|--:|",
+    ]
+    for r in rows:
+        star = "" if r["complete"] else "\\*"
+        L.append(
+            f"| {r['label']}{star} | {r['n']} | ${r['cap_in']:,.0f} | ${r['cap_out']:,.0f} | "
+            f"${r['remaining']:,.0f} | {_pct(r['roi'])} | {_pct(r['roi'] - r['spy_roi'])} |"
+        )
+    return L
+
+
+def _render_locked(act, results, annual, quarterly, downside, strats, n_core) -> str:
+    names = [n for n, _ in strats]
+    hp = results["1-year"]
+    L = [
+        "---",
+        "type: backtest",
+        "epic: Black Box",
+        "track: Insider Trader",
+        "status: canonical",
+        f"created: {datetime.now().strftime('%m-%d-%Y')}",
+        "---",
+        "# Insider Trader — Phase 1 LOCKED: Full Backtest",
+        "",
+        f"> {_LOCKED_DESC} $100 bought at the close on/after the **disclosure date**; compared "
+        "to the same $100 in **SPY** on the same dates. Look-ahead-safe; open positions marked "
+        f"to market as of {TODAY}. The 3 sell rules below are the **locked candidates** (we pick "
+        "one before paper trading). See [[../Phase 1 Strategy (Locked)]] and [[../Backtesting "
+        "Playbook]].",
+        "",
+        "## Summary",
+        f"- **{act['n']} trades** pass the locked filter ({n_core} clear the growth+proven core; "
+        f"the run-up >= +5% leg keeps {act['n']}). Signal months {act['span']}; "
+        f"avg {act['avg_per_mo']:.1f}/mo, longest no-signal gap {act['max_gap']} months.",
+        f"- **Best risk-adjusted candidate (1-year hold): +{hp['roi'] * 100:.1f}% total ROI vs "
+        f"SPY's {hp['spy_roi'] * 100:+.1f}% = a +{(hp['roi'] - hp['spy_roi']) * 100:.1f}% edge** "
+        f"over the same windows; {hp['win_rate'] * 100:.0f}% of bets finished green.",
+        "- Longitudinal read on consistency is in the per-year / per-quarter tables at the end.",
+        "",
+        "## Topline — cumulative results by sell strategy",
+        "| sell strategy | trades | total ROI | SPY-alt ROI | **edge** | mean ret | "
+        "mean mkt-adj | median | win% | beat-mkt% | % still open |",
+        "|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|",
+    ]
+    for name in names:
+        r = results[name]
+        L.append(
+            f"| {name} | {r['n']} | {_pct(r['roi'])} | {_pct(r['spy_roi'])} | "
+            f"**{_pct(r['roi'] - r['spy_roi'])}** | {_pct(r['ret_avg'])} | {_pct(r['exc_avg'])} | "
+            f"{_pct(r['ret_med'])} | {r['win_rate'] * 100:.0f}% | {r['beat_rate'] * 100:.0f}% | "
+            f"{r['pct_open'] * 100:.0f}% |"
+        )
+
+    L += [
+        "",
+        "## Detailed breakdown — dispersion & downside",
+        "| sell strategy | end value | raw ret var | mkt-adj var | worst bet | best bet | "
+        "% bets red | % bets halved | quarterly max drawdown | worst quarter |",
+        "|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|",
+    ]
+    for name in names:
+        r = results[name]
+        d = downside[name]
+        wq = _pct(d["worst_q"]) if d["worst_q"] is not None else "n/a"
+        L.append(
+            f"| {name} | ${r['end_value']:,.0f} | {r['ret_var']:.3f} | {r['exc_var']:.3f} | "
+            f"{_pct(d['worst_bet'])} | {_pct(d['best_bet'])} | {d['pct_neg'] * 100:.0f}% | "
+            f"{d['pct_halved'] * 100:.0f}% | {d['q_maxdd'] * 100:.0f}% | {wq} |"
+        )
+    L += [
+        "",
+        "_Worst/best bet = single-position return. % halved = bets that lost >=50%. Quarterly "
+        "max drawdown = deepest peak-to-trough of an equity curve that reinvests fresh into each "
+        "quarter's cohort (see longitudinal). These quantify the bumpiness behind the averages.",
+        "",
+        "## Longitudinal analysis (start fresh each period, hold for just that period)",
+        "_Each row: start from $0 at the period's open, place $100 on every signal that fires "
+        "in the period, and close/mark the book at the period end. **capital out** = proceeds "
+        "from positions the sell rule closed within the period; **portfolio left** = "
+        "mark-to-market of positions still open at period end. \\* = partial/incomplete period "
+        "(first cohort starts mid-2014; the latest is still in progress).",
+    ]
+    for name in names:
+        L += ["", f"### {name} — by year"]
+        L += _long_table(annual[name])
+    for name in names:
+        L += ["", f"### {name} — by quarter"]
+        L += _long_table(quarterly[name])
+
+    # consistency read on the 1-year candidate
+    ya = annual["1-year"]
+    done_yrs = [r for r in ya if r["complete"]]
+    neg_yrs = [r["label"] for r in done_yrs if r["roi"] - r["spy_roi"] < 0]
+    qq = quarterly["1-year"]
+    done_q = [r for r in qq if r["complete"]]
+    neg_q = sum(1 for r in done_q if r["roi"] - r["spy_roi"] < 0)
+    L += [
+        "",
+        "## Consistency & variance (read)",
+        f"- **Annual (1-year hold):** of {len(done_yrs)} complete years, "
+        f"{len(done_yrs) - len(neg_yrs)} beat SPY and {len(neg_yrs)} trailed it"
+        + (f" ({', '.join(neg_yrs)})" if neg_yrs else "")
+        + ". Watch whether the down years cluster recently (edge decay) or are scattered.",
+        f"- **Quarterly (1-year hold):** {len(done_q) - neg_q} of {len(done_q)} complete "
+        f"quarters beat SPY ({neg_q} trailed). Quarterly is noisier — a run of consecutive "
+        "negative quarters is the real risk signal, more than any single down quarter.",
+        "- Compare the early years to the most recent complete ones: if the edge is shrinking "
+        "as more people copy congressional trades, the recent cohorts will show it first.",
+        "- Caveats: House-only; survivorship-pruned; OTC/split-artifact excluded; late-period "
+        "cohorts hold for less than a full window. Re-validate with Senate data.",
+    ]
+    return "\n".join(L)
+
+
 if __name__ == "__main__":
     import sys
 
@@ -728,5 +993,7 @@ if __name__ == "__main__":
         run_directional()
     elif arg == "nosize":
         run_nosize()
+    elif arg == "locked":
+        run_locked()
     else:
         run(arg)
