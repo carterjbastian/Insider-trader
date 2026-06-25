@@ -1,15 +1,17 @@
 """Phase-1 isolation backtest: $100/signal on the quantitative buy gate; 7 sell sims.
 
-BUY GATE (Phase 1): a House congressional PURCHASE with a tradeable ticker whose
-sector is NOT a defensive dead-zone (Utilities / Real Estate / Consumer Defensive /
-Financial Services). We BUY $100 at the close on/after the **disclosure date** (public
-info — never the member's trade date). Then simulate seven sell rules and compare every
-result to placing the same $100, on the same buy/sell dates, into SPY.
+CANONICAL PHASE-1 GATE = "high-precision" (set by Carter 2026-06-25): a House
+PURCHASE in a GROWTH sector, SMALL position ($1k-$15k bracket), by a PROVEN trader
+(prior 90-day market-beating big-win). The looser "exclude-defensive" gate is retired
+(kept only for reproducing the 06-24 report). We BUY $100 at the close on/after the
+**disclosure date** (public info — never the member's trade date), then simulate seven
+sell rules and compare every result to the same $100, same dates, in SPY.
 
 Look-ahead-safe: signals act on the disclosure date; positions not yet sold at sim end
 are marked-to-market. See the vault "Backtesting Playbook". Writes a markdown report.
 
-  DATABASE_URL=... uv run python -m insider_trader.phase1_backtest
+  DATABASE_URL=... uv run python -m insider_trader.phase1_backtest                # high-precision
+  DATABASE_URL=... uv run python -m insider_trader.phase1_backtest missed-action  # run-up sweep
 """
 
 from __future__ import annotations
@@ -48,6 +50,11 @@ GATES = {
         "out": _BTDIR + "2026-06-25 Phase 1 High-Precision.md",
     },
 }
+# "missed-action" sweep: on top of high-precision, exclude buys whose ticker already ran up
+# more than X% between the member's purchase date and the public disclosure date (the gain we
+# couldn't capture). Thresholds chosen as round levels spanning the run-up distribution.
+MISSED_THRESHOLDS = [0.05, 0.10, 0.20, 0.30, 0.50]
+_MISSED_OUT = _BTDIR + "2026-06-25 Phase 1 Missed-Action Sweep.md"
 
 
 # --- data -------------------------------------------------------------------
@@ -56,7 +63,7 @@ GATES = {
 def _load(conn, gate="exclude-defensive"):
     base = (
         "SELECT DISTINCT ON (f.bioguide, t.ticker, t.txn_date) "
-        "f.bioguide, m.full_name, t.ticker, s.sector, t.disclosure_date "
+        "f.bioguide, m.full_name, t.ticker, s.sector, t.disclosure_date, t.txn_date "
         "FROM transactions t JOIN filings f USING(doc_id) "
         "JOIN members m ON m.bioguide=f.bioguide "
         "JOIN securities s ON s.ticker=t.ticker AND s.ok "
@@ -79,7 +86,9 @@ def _load(conn, gate="exclude-defensive"):
         else:
             cur.execute(base + common + "AND s.sector <> ALL(%s) " + order, (list(DEFENSIVE),))
         sigs = [
-            dict(zip(["bioguide", "member", "ticker", "sector", "disc"], r, strict=True))
+            dict(
+                zip(["bioguide", "member", "ticker", "sector", "disc", "txn_date"], r, strict=True)
+            )
             for r in cur.fetchall()
         ]
         cur.execute(
@@ -242,21 +251,21 @@ def _activity(bets):
     }
 
 
-def run(gate: str = "exclude-defensive", out_path: str | None = None) -> dict:
-    out_path = out_path or GATES[gate]["out"]
-    conn = store.connect()
-    sigs, sales = _load(conn, gate)
-    conn.close()
-    print(f"[{gate}] {len(sigs)} Phase-1 buy signals; fetching prices...", flush=True)
-    prices = _prices([s["ticker"] for s in sigs])
+def _gap(ser, txn_date, buy):
+    """Purchase->disclosure price move: the run-up we couldn't capture because we can
+    only legally act on the (public) disclosure date. None if no txn-date price."""
+    hit = _on_after(ser, txn_date)
+    if not hit or hit[1] <= 0:
+        return None
+    return buy[1] / hit[1] - 1.0
 
+
+def _build_bets(sigs, sales, prices):
     bets = []
     for s in sigs:
         ser = prices.get(s["ticker"])
-        spy_buy0 = None
         buy = _on_after(ser, s["disc"]) if ser else None
-        if buy:
-            spy_buy0 = _on_after(prices["SPY"], buy[0])
+        spy_buy0 = _on_after(prices["SPY"], buy[0]) if buy else None
         if not buy or not spy_buy0:
             continue
         bets.append(
@@ -270,17 +279,68 @@ def run(gate: str = "exclude-defensive", out_path: str | None = None) -> dict:
                 "shares": BET / buy[1],
                 "spy_buy": spy_buy0[1],
                 "sales": sales,
+                "gap": _gap(ser, s["txn_date"], buy),
             }
         )
+    return bets
 
+
+def _sims(bets, prices):
+    return {name: _agg(_simulate(key, bets, prices)) for name, key in STRATS}
+
+
+def run(gate: str = "high-precision", out_path: str | None = None) -> dict:
+    out_path = out_path or GATES[gate]["out"]
+    conn = store.connect()
+    sigs, sales = _load(conn, gate)
+    conn.close()
+    print(f"[{gate}] {len(sigs)} Phase-1 buy signals; fetching prices...", flush=True)
+    prices = _prices([s["ticker"] for s in sigs])
+
+    bets = _build_bets(sigs, sales, prices)
     activity = _activity(bets)
-    results = {name: _agg(_simulate(key, bets, prices)) for name, key in STRATS}
+    results = _sims(bets, prices)
     md = _render(activity, results, GATES[gate]["desc"])
     with open(out_path, "w") as f:
         f.write(md)
     print(f"\nwrote {out_path}\n")
     print(md)
     return {"activity": activity, "results": results}
+
+
+def _pctile(sorted_vals, q):
+    if not sorted_vals:
+        return None
+    i = min(len(sorted_vals) - 1, int(q * len(sorted_vals)))
+    return sorted_vals[i]
+
+
+def run_missed_action(thresholds=None, out_path=None) -> dict:
+    """High-precision gate + a sweep of pre-disclosure run-up exclusion thresholds."""
+    thresholds = thresholds or MISSED_THRESHOLDS
+    out_path = out_path or _MISSED_OUT
+    conn = store.connect()
+    sigs, sales = _load(conn, "high-precision")
+    conn.close()
+    print(f"[missed-action] {len(sigs)} high-precision signals; fetching prices...", flush=True)
+    prices = _prices([s["ticker"] for s in sigs])
+
+    bets = _build_bets(sigs, sales, prices)
+    gaps = sorted(b["gap"] for b in bets if b["gap"] is not None)
+    n_unknown = sum(1 for b in bets if b["gap"] is None)
+
+    baseline = _sims(bets, prices)
+    variants = []  # (threshold, kept_count, ruled_out, results)
+    for t in thresholds:
+        kept = [b for b in bets if b["gap"] is None or b["gap"] <= t]
+        variants.append((t, len(kept), len(bets) - len(kept), _sims(kept, prices)))
+
+    md = _render_missed(len(bets), gaps, n_unknown, baseline, variants)
+    with open(out_path, "w") as f:
+        f.write(md)
+    print(f"\nwrote {out_path}\n")
+    print(md)
+    return {"n": len(bets), "gaps": gaps, "baseline": baseline, "variants": variants}
 
 
 # --- markdown report --------------------------------------------------------
@@ -352,7 +412,98 @@ def _render(act, results, gate_desc) -> str:
     return "\n".join(L)
 
 
+def _render_missed(n_bets, gaps, n_unknown, baseline, variants) -> str:
+    mean_gap = statistics.fmean(gaps) if gaps else 0.0
+    med_gap = statistics.median(gaps) if gaps else 0.0
+    pos = sum(1 for g in gaps if g > 0)
+    hi = baseline["1-year"]
+    L = [
+        "---",
+        "type: backtest",
+        "epic: Black Box",
+        "track: Insider Trader",
+        f"created: {datetime.now().strftime('%m-%d-%Y')}",
+        "---",
+        "# Insider Trader — Phase 1 + Missed-Action Filter Sweep",
+        "",
+        "> **Base gate:** high-precision (House PURCHASE in a GROWTH sector, SMALL position "
+        "$1k–$15k, by a PROVEN trader with a prior 90-day big-win). **Added filter under test:** "
+        "exclude any buy whose ticker had already risen more than **X%** between the member's "
+        "**purchase date** and the **disclosure date** — the run-up we couldn't capture because "
+        "we can only act on the public disclosure. $100/bet, all 7 sell rules, vs SPY on the "
+        f"same dates. Look-ahead-safe; open positions marked-to-market as of {TODAY}.",
+        "",
+        "## Pre-disclosure run-up distribution (high-precision set)",
+        f"- **{len(gaps)}** of {n_bets} bets have a measurable purchase→disclosure move "
+        f"({n_unknown} lacked a purchase-date price and are never auto-excluded).",
+        f"- mean **{_pct(mean_gap)}**, median **{_pct(med_gap)}**; "
+        f"**{pos / len(gaps) * 100:.0f}%** rose before disclosure (rest flat/down).",
+        "- percentiles (move by disclosure): "
+        + ", ".join(
+            f"p{int(q * 100)} {_pct(_pctile(gaps, q))}" for q in (0.5, 0.6, 0.75, 0.9, 0.95)
+        ),
+        "",
+        "## Trades ruled out by threshold",
+        "| exclude run-up > | bets kept | ruled out | % ruled out |",
+        "|---|--:|--:|--:|",
+        f"| (baseline — none) | {n_bets} | 0 | 0% |",
+    ]
+    for t, kept, ruled, _ in variants:
+        L.append(f"| {t * 100:.0f}% | {kept} | {ruled} | {ruled / n_bets * 100:.0f}% |")
+
+    L += [
+        "",
+        "## Market-adjusted EDGE vs SPY, by sell strategy",
+        "_Each cell = strategy ROI − SPY-alt ROI over the identical windows. "
+        "Δ = change vs the no-filter baseline._",
+        "",
+        "| sell strategy | baseline | "
+        + " | ".join(f">{int(t * 100)}%" for t, _, _, _ in variants)
+        + " |",
+        "|---|--:|" + "--:|" * len(variants),
+    ]
+    for name, _ in STRATS:
+        b_edge = baseline[name]["roi"] - baseline[name]["spy_roi"]
+        cells = [f"**{_pct(b_edge)}**"]
+        for _, _, _, res in variants:
+            e = res[name]["roi"] - res[name]["spy_roi"]
+            cells.append(f"{_pct(e)} ({_pct(e - b_edge)})")
+        L.append(f"| {name} | " + " | ".join(cells) + " |")
+
+    L += [
+        "",
+        "## Total ROI, by sell strategy",
+        "| sell strategy | baseline | "
+        + " | ".join(f">{int(t * 100)}%" for t, _, _, _ in variants)
+        + " |",
+        "|---|--:|" + "--:|" * len(variants),
+    ]
+    for name, _ in STRATS:
+        cells = [f"**{_pct(baseline[name]['roi'])}**"]
+        cells += [_pct(res[name]["roi"]) for _, _, _, res in variants]
+        L.append(f"| {name} | " + " | ".join(cells) + " |")
+
+    L += [
+        "",
+        "## Read",
+        f"- Baseline high-precision 1-yr edge is **{_pct(hi['roi'] - hi['spy_roi'])}** "
+        f"({hi['n']} bets). The question: does cutting already-ran-up buys *raise* the edge "
+        "by enough to justify the lost volume?",
+        "- A threshold helps only if the kept set's edge rises **and** enough bets survive. "
+        "Watch the Δ columns: positive Δ with a small % ruled out = a free improvement; "
+        "positive Δ that needs cutting half the book = a volume/edge trade-off to weigh.",
+        "- Caveats: House-only; survivorship-pruned; OTC/split-artifact tickers excluded. "
+        "Pre-disclosure move uses adjusted closes at/after the purchase and disclosure dates. "
+        "To be re-validated with Senate data.",
+    ]
+    return "\n".join(L)
+
+
 if __name__ == "__main__":
     import sys
 
-    run(sys.argv[1] if len(sys.argv) > 1 else "exclude-defensive")
+    arg = sys.argv[1] if len(sys.argv) > 1 else "high-precision"
+    if arg == "missed-action":
+        run_missed_action()
+    else:
+        run(arg)
