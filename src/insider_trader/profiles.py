@@ -17,9 +17,15 @@ reused across all of that member's trades. Two layers:
 from __future__ import annotations
 
 import json
+import urllib.parse
+import urllib.request
 
 from . import store
 from .members import _get  # cached congress-legislators fetch
+
+_WIKI_API = "https://en.wikipedia.org/w/api.php"
+_UA = "blackbox-insider-trader/0.1 (personal research)"
+PROFILE_MODEL = "claude-opus-4-8"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS member_profiles (
@@ -41,17 +47,26 @@ def legislator_index() -> dict[str, dict]:
     return {leg["id"]["bioguide"]: leg for leg in legs if leg.get("id", {}).get("bioguide")}
 
 
+def _committee_names() -> dict[str, str]:
+    """thomas_id -> full name, including subcommittees (keyed parent+sub, e.g. 'SSAF13')."""
+    out: dict[str, str] = {}
+    for c in _get("committees-current.json"):
+        tid = c.get("thomas_id", "")
+        if tid:
+            out[tid] = c["name"]
+        for sub in c.get("subcommittees", []):
+            out[tid + sub.get("thomas_id", "")] = f"{c['name']} — {sub.get('name', '')}"
+    return out
+
+
 def _committee_history() -> dict[str, list[dict]]:
-    """bioguide -> [{thomas_id, name, rank, title}] from current membership (current-only;
+    """bioguide -> [{code, name, rank, title}] from current membership (current-only;
     historical committee tenure isn't in this free source — flagged as a point-in-time gap)."""
     membership = _get("committee-membership-current.json")
-    committees = {
-        c.get("thomas_id") or (c.get("type", "") + c.get("name", "")): c["name"]
-        for c in _get("committees-current.json")
-    }
+    names = _committee_names()
     out: dict[str, list[dict]] = {}
     for code, members in membership.items():
-        name = committees.get(code, code)
+        name = names.get(code, code)
         for m in members:
             out.setdefault(m["bioguide"], []).append(
                 {"code": code, "name": name, "rank": m.get("rank"), "title": m.get("title")}
@@ -94,6 +109,51 @@ def build_spine(leg: dict, committees: list[dict] | None = None) -> dict:
     }
 
 
+def wikipedia_text(title: str | None, max_chars: int = 24000) -> str | None:
+    """Plain-text extract of a member's Wikipedia article (intro + body)."""
+    if not title:
+        return None
+    q = urllib.parse.urlencode(
+        {
+            "format": "json",
+            "action": "query",
+            "prop": "extracts",
+            "explaintext": "1",
+            "redirects": "1",
+            "titles": title,
+        }
+    )
+    req = urllib.request.Request(_WIKI_API + "?" + q, headers={"User-Agent": _UA})
+    with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310 (trusted host)
+        data = json.load(r)
+    for p in data.get("query", {}).get("pages", {}).values():
+        ext = p.get("extract")
+        if ext:
+            return ext[:max_chars]
+    return None
+
+
+_PROFILE_SYS = """You are building a concise BIOGRAPHICAL dossier on a member of the US \
+Congress, to help judge whether their stock trades might ride on professional or personal \
+informational advantages a random investor wouldn't have.
+
+From the structured career timeline and the Wikipedia text provided, extract the DURABLE, \
+career-defining facts — NOT recent news. Focus on what gives them an information edge:
+- Profession(s) and industries BEFORE Congress (law, business, medicine, finance, energy, \
+real estate, military, tech, agriculture, etc.) and any companies/firms founded or led.
+- Education and professional training.
+- Business interests, board memberships, major asset/wealth sources, family business ties.
+- Personal/professional relationships tying them to specific industries or companies.
+- The economic base of the state/district they represent.
+
+RULES:
+- Prefer time-stable facts (pre-Congress career, education, founding a company) over dated \
+recent events, so the profile stays valid across the years we analyze.
+- Be factual and specific; if something isn't supported by the provided text, omit it.
+- `access_synthesis`: 1-2 sentences naming the sectors/industries where this person most \
+plausibly has a non-public information edge, given their background + roles."""
+
+
 def save_profile(conn, bioguide, spine, wikipedia=None, profile_md=None, sources=None, model=None):
     with conn.cursor() as cur:
         cur.execute(_SCHEMA)
@@ -114,6 +174,104 @@ def save_profile(conn, bioguide, spine, wikipedia=None, profile_md=None, sources
             ),
         )
     conn.commit()
+
+
+def _spine_brief(spine: dict) -> str:
+    """Compact, dated rendering of the structured spine for the summarizer / dossier."""
+    tl = "; ".join(
+        f"{t['start'][:4]}–{(t['end'] or '')[:4]} {t['chamber']} {t['state']}"
+        f"{('-' + str(t['district'])) if t.get('district') else ''} ({t['party']})"
+        for t in spine.get("timeline", [])
+    )
+    lead = "; ".join(
+        f"{r['role']} ({(r['start'] or '')[:4]}–{(r['end'] or '')[:4]})"
+        for r in spine.get("leadership_roles", [])
+    )
+    coms = "; ".join(
+        f"{c['name']}{(' [' + c['title'] + ']') if c.get('title') else ''}"
+        for c in spine.get("committees_current", [])
+    )
+    return "\n".join(
+        [
+            f"Name: {spine.get('full_name')}  (born {spine.get('birthday') or '?'})",
+            f"In office: {spine.get('entered_office')} → {spine.get('left_office')} "
+            f"({spine.get('n_terms')} terms)",
+            f"Service timeline: {tl or 'n/a'}",
+            f"Leadership roles (dated): {lead or 'none'}",
+            f"Current committees: {coms or 'none on record'}",
+        ]
+    )
+
+
+def summarize_profile(spine: dict, wiki_text: str | None, model: str = PROFILE_MODEL):
+    """Opus-summarize the spine + Wikipedia into a structured biographical profile."""
+
+    import anthropic
+    from pydantic import BaseModel
+
+    class BioProfile(BaseModel):
+        pre_congress_career: str  # professions/industries + firms founded/led
+        education: str
+        business_interests: str  # boards, holdings, wealth sources, family business
+        industry_ties: str  # personal/professional relationships to industries/companies
+        state_economy: str  # economic base of their state/district
+        notable: str  # other durable, edge-relevant facts
+        access_synthesis: str  # 1-2 sentences: where they most plausibly have an info edge
+        edge_sectors: list[str]  # sectors/industries flagged as plausible info-edge areas
+
+    user = (
+        "STRUCTURED CAREER TIMELINE:\n"
+        + _spine_brief(spine)
+        + "\n\nWIKIPEDIA:\n"
+        + (wiki_text or "(no Wikipedia text available)")
+    )
+    client = anthropic.Anthropic()
+    resp = client.messages.parse(
+        model=model,
+        max_tokens=4000,
+        system=_PROFILE_SYS,
+        messages=[{"role": "user", "content": user}],
+        output_format=BioProfile,
+        thinking={"type": "adaptive"},
+    )
+    if resp.stop_reason == "refusal":
+        return None
+    return resp.parsed_output
+
+
+def profile_markdown(spine: dict, bio) -> str:
+    """Render the full biographical profile (spine + narrative) for the trade dossier."""
+    lines = ["**Career timeline (dated, point-in-time):**", _spine_brief(spine), ""]
+    if bio:
+        lines += [
+            f"**Pre-Congress career:** {bio.pre_congress_career}",
+            f"**Education:** {bio.education}",
+            f"**Business interests:** {bio.business_interests}",
+            f"**Industry ties:** {bio.industry_ties}",
+            f"**State/district economy:** {bio.state_economy}",
+            f"**Notable:** {bio.notable}",
+            f"**Plausible information edge:** {bio.access_synthesis} "
+            f"(sectors: {', '.join(bio.edge_sectors) or 'none'})",
+        ]
+    return "\n".join(lines)
+
+
+def build_profile(
+    conn, bioguide: str, model: str = PROFILE_MODEL, idx=None, chist=None
+) -> dict | None:
+    """Full profile for one member: spine + Wikipedia + Opus summary → persist. Returns the row."""
+    idx = idx if idx is not None else legislator_index()
+    chist = chist if chist is not None else _committee_history()
+    leg = idx.get(bioguide)
+    if not leg:
+        return None
+    spine = build_spine(leg, chist.get(bioguide, []))
+    wiki = wikipedia_text(spine.get("wikipedia"))
+    bio = summarize_profile(spine, wiki, model) if wiki else None
+    md = profile_markdown(spine, bio)
+    sources = {"wikipedia": spine.get("wikipedia"), "had_wiki": bool(wiki)}
+    save_profile(conn, bioguide, spine, spine.get("wikipedia"), md, sources, model)
+    return {"bioguide": bioguide, "name": spine.get("full_name"), "had_wiki": bool(wiki), "md": md}
 
 
 def build_spines(conn, bioguides: list[str] | None = None) -> dict:
