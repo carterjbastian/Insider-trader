@@ -17,7 +17,6 @@ than bypass it. Lands in the SAME Neon filings/transactions tables as the House 
 
 from __future__ import annotations
 
-import html
 import http.cookiejar
 import re
 import urllib.parse
@@ -58,13 +57,22 @@ def _search(op, csrf, start: str, end: str, offset: int, length: int = 100) -> d
     import json
 
     payload = {
-        "start": str(offset), "length": str(length), "report_types": "[11]", "filer_types": "[]",
-        "submitted_start_date": f"{start} 00:00:00", "submitted_end_date": f"{end} 23:59:59",
-        "candidate_states": "[]", "senator_states": "[]", "office_id": "",
-        "first_name": "", "last_name": "", "csrfmiddlewaretoken": csrf,
+        "start": str(offset),
+        "length": str(length),
+        "report_types": "[11]",
+        "filer_types": "[]",
+        "submitted_start_date": f"{start} 00:00:00",
+        "submitted_end_date": f"{end} 23:59:59",
+        "candidate_states": "[]",
+        "senator_states": "[]",
+        "office_id": "",
+        "first_name": "",
+        "last_name": "",
+        "csrfmiddlewaretoken": csrf,
     }
     req = urllib.request.Request(
-        BASE + "/search/report/data/", data=urllib.parse.urlencode(payload).encode(),
+        BASE + "/search/report/data/",
+        data=urllib.parse.urlencode(payload).encode(),
         headers={
             "X-CSRFToken": csrf,
             "X-Requested-With": "XMLHttpRequest",

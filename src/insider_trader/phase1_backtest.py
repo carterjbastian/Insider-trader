@@ -33,28 +33,51 @@ STRATS = [
     ("sell-when-trader-sells", "trader"),
     ("buy & hold", "hold"),
 ]
-OUT = (
-    "/home/carter/vault/Projects/Black Box/Insider Trader/Backtests/2026-06-24 Phase 1 Isolation.md"
-)
+GROWTH = {"Technology", "Basic Materials", "Energy", "Communication Services", "Industrials"}
+_BTDIR = "/home/carter/vault/Projects/Black Box/Insider Trader/Backtests/"
+GATES = {
+    "exclude-defensive": {
+        "desc": "House PURCHASE, tradeable ticker, sector NOT in {Utilities, Real Estate, "
+        "Consumer Defensive, Financial Services} — the cheap rule-out gate.",
+        "out": _BTDIR + "2026-06-24 Phase 1 Isolation.md",
+    },
+    "high-precision": {
+        "desc": "House PURCHASE in a GROWTH sector (Technology / Basic Materials / Energy / "
+        "Communication Services / Industrials), SMALL position ($1,001-$15,000 bracket), by a "
+        "PROVEN trader (had a prior 90-day market-beating big-win) — the high-conviction gate.",
+        "out": _BTDIR + "2026-06-25 Phase 1 High-Precision.md",
+    },
+}
 
 
 # --- data -------------------------------------------------------------------
 
 
-def _load(conn):
+def _load(conn, gate="exclude-defensive"):
+    base = (
+        "SELECT DISTINCT ON (f.bioguide, t.ticker, t.txn_date) "
+        "f.bioguide, m.full_name, t.ticker, s.sector, t.disclosure_date "
+        "FROM transactions t JOIN filings f USING(doc_id) "
+        "JOIN members m ON m.bioguide=f.bioguide "
+        "JOIN securities s ON s.ticker=t.ticker AND s.ok "
+    )
+    common = (
+        "WHERE t.txn_type='purchase' AND t.ticker IS NOT NULL "
+        "AND t.disclosure_date IS NOT NULL AND s.sector IS NOT NULL "
+    )
+    order = "ORDER BY f.bioguide, t.ticker, t.txn_date, t.id"
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT DISTINCT ON (f.bioguide, t.ticker, t.txn_date) "
-            "f.bioguide, m.full_name, t.ticker, s.sector, t.disclosure_date "
-            "FROM transactions t JOIN filings f USING(doc_id) "
-            "JOIN members m ON m.bioguide=f.bioguide "
-            "JOIN securities s ON s.ticker=t.ticker AND s.ok "
-            "WHERE t.txn_type='purchase' AND t.ticker IS NOT NULL "
-            "AND t.disclosure_date IS NOT NULL "
-            "AND s.sector IS NOT NULL AND s.sector <> ALL(%s) "
-            "ORDER BY f.bioguide, t.ticker, t.txn_date, t.id",
-            (list(DEFENSIVE),),
-        )
+        if gate == "high-precision":
+            cur.execute(
+                base
+                + "JOIN trader_metrics tm ON tm.transaction_id=t.id "
+                + common
+                + "AND s.sector = ANY(%s) AND t.amount_high <= 15000 "
+                "AND tm.prior_bigwin90 > 0 " + order,
+                (list(GROWTH),),
+            )
+        else:
+            cur.execute(base + common + "AND s.sector <> ALL(%s) " + order, (list(DEFENSIVE),))
         sigs = [
             dict(zip(["bioguide", "member", "ticker", "sector", "disc"], r, strict=True))
             for r in cur.fetchall()
@@ -219,11 +242,12 @@ def _activity(bets):
     }
 
 
-def run(out_path: str = OUT) -> dict:
+def run(gate: str = "exclude-defensive", out_path: str | None = None) -> dict:
+    out_path = out_path or GATES[gate]["out"]
     conn = store.connect()
-    sigs, sales = _load(conn)
+    sigs, sales = _load(conn, gate)
     conn.close()
-    print(f"{len(sigs)} Phase-1 buy signals; fetching prices...", flush=True)
+    print(f"[{gate}] {len(sigs)} Phase-1 buy signals; fetching prices...", flush=True)
     prices = _prices([s["ticker"] for s in sigs])
 
     bets = []
@@ -251,7 +275,7 @@ def run(out_path: str = OUT) -> dict:
 
     activity = _activity(bets)
     results = {name: _agg(_simulate(key, bets, prices)) for name, key in STRATS}
-    md = _render(activity, results)
+    md = _render(activity, results, GATES[gate]["desc"])
     with open(out_path, "w") as f:
         f.write(md)
     print(f"\nwrote {out_path}\n")
@@ -266,7 +290,7 @@ def _pct(x):
     return f"{x * 100:+.1f}%"
 
 
-def _render(act, results) -> str:
+def _render(act, results, gate_desc) -> str:
     L = [
         "---",
         "type: backtest",
@@ -276,11 +300,10 @@ def _render(act, results) -> str:
         "---",
         "# Insider Trader — Phase 1 Isolation Backtest",
         "",
-        "> **Buy gate:** House congressional PURCHASE, tradeable ticker, sector NOT in "
-        "{Utilities, Real Estate, Consumer Defensive, Financial Services}. **$100** bought at "
-        "the close on/after the **disclosure date**. Phase-1 quantitative gate only — no LLM. "
-        "Compared to the same $100 in **SPY** on the same buy/sell dates. Look-ahead-safe; "
-        f"open positions marked-to-market as of {TODAY}. See [[../Backtesting Playbook]].",
+        f"> **Buy gate:** {gate_desc} **$100** bought at the close on/after the **disclosure "
+        "date**. Phase-1 quantitative gate only — no LLM. Compared to the same $100 in **SPY** "
+        f"on the same buy/sell dates. Look-ahead-safe; open positions marked-to-market as of "
+        f"{TODAY}. See [[../Backtesting Playbook]].",
         "",
         "## Activity (same for all sell strategies — the buy side is identical)",
         f"- **Bets placed:** {act['n']}  (signal months {act['span']})",
@@ -330,4 +353,6 @@ def _render(act, results) -> str:
 
 
 if __name__ == "__main__":
-    run()
+    import sys
+
+    run(sys.argv[1] if len(sys.argv) > 1 else "exclude-defensive")
