@@ -4,9 +4,9 @@
   Channel 2 — friends email: ONLY when there's a buy/sell, to the distribution list, with the
               signal details, instructions, a portfolio overview, and a not-advice disclaimer.
 
-Telegram uses TELEGRAM_BOT_TOKEN (the job's own bot) + CHAT_ID. Email uses SMTP_* env vars
-(SMTP_HOST/PORT/USER/PASS/FROM) — if they're absent the email step logs and skips rather than
-failing the run, so we can wire email the moment the credentials land.
+Telegram uses TELEGRAM_BOT_TOKEN + CHAT_ID. Email uses the SendGrid HTTPS API (SENDGRID_API_KEY)
+because the droplet blocks outbound SMTP; if the key is absent the email step logs and skips
+rather than failing the run, so it wires up the moment the key lands.
 """
 
 from __future__ import annotations
