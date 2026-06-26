@@ -360,7 +360,8 @@ def snapshot(conn, prices):
 def render(conn, today, prices):
     st, rows, held = snapshot(conn, prices)
     total = held + st["pool"]
-    personal = st["personal_in"] or 1.0
+    personal = st["personal_in"] or 0.0
+    ret_str = f"{(total / personal - 1) * 100:+.1f}%" if personal else "— (no positions yet)"
     opens = [r for r in rows if r["status"] == "open"]
     closed = [r for r in rows if r["status"] == "closed"]
     L = [
@@ -380,7 +381,7 @@ def render(conn, today, prices):
         f"- **Personal capital deployed:** ${personal:,.2f}",
         f"- **Current portfolio value:** ${total:,.2f}  (open positions ${held:,.2f} + "
         f"realized-gains pool ${st['pool']:,.2f})",
-        f"- **Total return on personal capital:** {(total / personal - 1) * 100:+.1f}%",
+        f"- **Total return on personal capital:** {ret_str}",
         f"- **Open positions:** {len(opens)}  |  **Closed:** {len(closed)}  |  "
         f"**Current matching multiplier:** {st['multiplier']}x ({st['mult_quarter']})",
         "",

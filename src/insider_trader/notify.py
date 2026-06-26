@@ -102,12 +102,14 @@ def run_summary(stats: dict, buys: list, sells: list, port: dict | None) -> str:
             lines.append(f"  • {s['ticker']} (copy {s['member']})")
     if not buys and not sells:
         lines.append("\nNo new buy/sell signals today.")
-    if port:
+    if port and port["personal"] > 0:
         lines.append(
             f"\nPaper portfolio: ${port['total']:,.0f} on ${port['personal']:,.0f} in "
             f"({(port['total'] / port['personal'] - 1) * 100:+.0f}%), "
             f"{port['open']} open / {port['closed']} closed."
         )
+    elif port:
+        lines.append("\nPaper portfolio: empty — no positions opened yet.")
     return "\n".join(lines)
 
 
@@ -126,7 +128,7 @@ def signal_email_body(buys: list, sells: list, port: dict | None) -> str:
             f"SELL: {s['ticker']}  (mirroring {s['member']}) — exit the position "
             "(the member sold, or the 18-month hold elapsed).\n"
         )
-    if port:
+    if port and port["personal"] > 0:
         parts.append(
             f"\n— Paper portfolio (for anyone following along) —\n"
             f"Value: ${port['total']:,.2f} on ${port['personal']:,.2f} deployed "
