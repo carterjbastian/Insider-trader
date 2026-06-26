@@ -16,12 +16,14 @@ Member profiles are refreshed on a ~6-month cadence (`refresh_profiles`), separa
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import date
 
 from . import house, members, metrics, notify, paper, phase2, securities, senate, store
 from .phase1_backtest import GROWTH, _on_after, _prices
 
-LOOKBACK_DAYS = 21  # how far back to scan for new locked candidates (covers any seeding gap)
+# GO-LIVE: we only act on disclosures dated on/after this — a true day-of strategy, no backfill.
+# Portfolio (paper + any real) starts EMPTY and fills only as genuinely-new signals arrive.
+GO_LIVE = date(2026, 6, 27)
 
 _SIGNALS_DDL = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -101,7 +103,7 @@ def _new_locked_candidates(conn) -> list[dict]:
             "AND t.disclosure_date >= %s AND s.sector = ANY(%s) AND tm.prior_bigwin90 > 0 "
             "AND NOT EXISTS (SELECT 1 FROM signals g WHERE g.transaction_id=t.id AND g.kind='buy') "
             "ORDER BY f.bioguide, t.ticker, t.txn_date, t.id",
-            (date.today() - timedelta(days=LOOKBACK_DAYS), list(GROWTH)),
+            (GO_LIVE, list(GROWTH)),
         )
         cols = ["tid", "bioguide", "member", "ticker", "txn_date", "disc"]
         return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]

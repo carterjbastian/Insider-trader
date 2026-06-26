@@ -6,7 +6,7 @@ quarterly 2x matching multiplier from the realized-gains pool, and the sell rule
 close; options at the real Polygon premium. State lives in Postgres (paper_*) and is rendered
 to a vault markdown doc each daily run.
 
-Inception = the first daily run (2026-06-26). Used by `daily.py`.
+Inception = the first daily run (2026-06-27); day-of signals only, no backfill. Used by `daily.py`.
 """
 
 from __future__ import annotations
