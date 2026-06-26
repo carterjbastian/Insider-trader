@@ -32,17 +32,97 @@ TODAY = date(2026, 6, 24)
 HOLD_CAP = timedelta(days=548)  # ~18 months
 
 
-def _qidx(d):
-    return (d.year - 2022) * 4 + (d.month - 1) // 3
+def _qidx(d):  # absolute quarter index (year*4 + quarter), works for any window
+    return d.year * 4 + (d.month - 1) // 3
 
 
 def _qlabel(i):
-    return f"{2022 + i // 4}-Q{i % 4 + 1}"
+    return f"{i // 4}-Q{i % 4 + 1}"
+
+
+def _qstart(i):
+    return date(i // 4, (i % 4) * 3 + 1, 1)
 
 
 def _price_on(ser, d):
     h = _on_after(ser, d)
     return h[1] if h else _last(ser)[1]
+
+
+def _load_window(conn, start, end):
+    """Locked-candidate loader for an arbitrary disclosure-date window [start, end)."""
+    from .phase1_backtest import GROWTH
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT ON (f.bioguide, t.ticker, t.txn_date) "
+            "t.id, f.bioguide, m.full_name, t.ticker, t.txn_date, t.disclosure_date, "
+            "a.signal_strength, a.buy "
+            "FROM transactions t JOIN filings f USING(doc_id) "
+            "JOIN members m ON m.bioguide=f.bioguide "
+            "JOIN securities s ON s.ticker=t.ticker AND s.ok "
+            "JOIN trader_metrics tm ON tm.transaction_id=t.id "
+            "LEFT JOIN phase2_analyses a ON a.transaction_id=t.id AND a.prompt_version='p2-v1' "
+            "WHERE t.txn_type='purchase' AND t.ticker IS NOT NULL "
+            "AND t.disclosure_date >= %s AND t.disclosure_date < %s "
+            "AND s.sector = ANY(%s) AND tm.prior_bigwin90 > 0 "
+            "ORDER BY f.bioguide, t.ticker, t.txn_date, t.id",
+            (start, end, list(GROWTH)),
+        )
+        cols = ["tid", "bioguide", "member", "ticker", "txn_date", "disc", "signal", "buy"]
+        sigs = [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+        cur.execute(
+            "SELECT f.bioguide, t.ticker, t.disclosure_date FROM transactions t "
+            "JOIN filings f USING(doc_id) WHERE t.txn_type='sale' AND t.ticker IS NOT NULL "
+            "AND t.disclosure_date IS NOT NULL"
+        )
+        sales = defaultdict(list)
+        for bio, tk, d in cur.fetchall():
+            sales[(bio, tk)].append(d)
+    for v in sales.values():
+        v.sort()
+    return sigs, sales
+
+
+def _fetch_options_bs(bets, prices):
+    """Black-Scholes-modeled 1-yr ATM call for each Tier-3 bet (for pre-2022 windows with no
+    real option data). Same b['opt'] shape as the real fetcher; entry = modeled per-share premium
+    treated as the per-contract cost (consistent with the real-data convention)."""
+    import math
+
+    from .options_backtest import bs_call, realized_vol
+
+    for b in bets:
+        b["opt"] = None
+        if b["tier"] != 3:
+            continue
+        ser = prices[b["ticker"]]
+        s0 = b["buy_close"]
+        k = s0
+        sigma = realized_vol(ser, b["buy_date"]) * 1.2
+        entry = bs_call(s0, k, 1.0, sigma)
+        if entry <= 0:
+            continue
+        ncon = max(1, math.ceil(100 / entry))
+        exp = b["buy_date"] + timedelta(days=365)
+        if exp <= TODAY:
+            hit = _on_after(ser, exp) or _last(ser)
+            exit_val, exit_date, expired = max(0.0, hit[1] - k), hit[0], True
+        else:
+            s_now = _last(ser)[1]
+            exit_val = bs_call(s_now, k, (exp - TODAY).days / 365, sigma)
+            exit_date, expired = TODAY, False
+        b["opt"] = {
+            "entry": entry,
+            "exit": exit_val,
+            "contracts": ncon,
+            "spend": ncon * entry,
+            "end": ncon * exit_val,
+            "ret": exit_val / entry - 1.0,
+            "exit_date": exit_date,
+            "expired": expired,
+            "strike": k,
+        }
 
 
 def _prep(bets, prices):
@@ -117,18 +197,23 @@ def run_engine(bets, prices, factor):
     by_q = defaultdict(list)
     for b in bets:
         by_q[_qidx(b["buy_date"])].append(b)
+    if not by_q:
+        return [], {"personal": 0, "total": 0, "roi": 0, "spy_roi": 0, "n": 0}
+    first_q = min(by_q)
     last_q = _qidx(TODAY)
-    base_by_q = {q: sum(b["base_spend"] for b in by_q[q]) for q in range(last_q + 1)}
+    base_by_q = {
+        q: sum(b["base_spend"] for b in by_q.get(q, [])) for q in range(first_q, last_q + 1)
+    }
 
     pool = personal = 0.0
     dilution = False
     records = []
-    for q in range(last_q + 1):
-        prior = [base_by_q[p] for p in range(max(0, q - 4), q)]
+    for q in range(first_q, last_q + 1):
+        prior = [base_by_q[p] for p in range(max(first_q, q - 4), q)]
         proj = (sum(prior) / len(prior)) if prior else (base_by_q[q] or 1.0)
         m_next = 1 + int(pool // (factor * proj)) if proj > 0 else 1
         m_next = min(m_next, 6)
-        qs = date(2022 + q // 4, (q % 4) * 3 + 1, 1)
+        qs = _qstart(q)
         port_start = _held_at(bets, prices, qs) + pool
 
         base = base_by_q[q]
@@ -159,6 +244,7 @@ def run_engine(bets, prices, factor):
         records.append(
             {
                 "q": _qlabel(q),
+                "qstart": qs,
                 "cap_in": personal,
                 "port_start": port_start,
                 "realized_pool": pool,
@@ -179,7 +265,9 @@ def run_engine(bets, prices, factor):
         "spy_roi": spy_val / personal - 1 if personal else 0,
         "dilution": dilution,
         "n": len(bets),
+        "first_q": first_q,
         "last_q": last_q,
+        "years": (last_q - first_q + 1) / 4,
         "base_by_q": base_by_q,
     }
     # fill cumulative ROI per record
@@ -258,13 +346,14 @@ def run(factor=1.5) -> None:
 def _render(bets, prices, records, summ, sum20):
     by_tier = {t: sum(1 for b in bets if b["tier"] == t) for t in (1, 2, 3)}
     n_opt = sum(1 for b in bets if b.get("opt"))
-    # IRRs for projection
+    # IRRs for projection (rebase quarters to 0 at the first bet)
+    fq = summ["first_q"]
     outflows = defaultdict(float)
     for b in bets:
-        outflows[_qidx(b["buy_date"])] += b["base_spend"]  # personal base
-    r_strat = _irr(outflows, summ["total"], summ["last_q"])
-    r_spy = _irr(outflows, summ["spy_val"], summ["last_q"])
-    annual_contrib = summ["personal"] / ((summ["last_q"] + 1) / 4)
+        outflows[_qidx(b["buy_date"]) - fq] += b["base_spend"]  # personal base
+    r_strat = _irr(outflows, summ["total"], summ["last_q"] - fq)
+    r_spy = _irr(outflows, summ["spy_val"], summ["last_q"] - fq)
+    annual_contrib = summ["personal"] / summ["years"]
 
     L = [
         "---",
@@ -319,7 +408,7 @@ def _render(bets, prices, records, summ, sum20):
         "|---|--:|--:|--:|--:|--:|--:|--:|",
     ]
     for r in records:
-        qs = date(2022 + int(r["q"][:4]) - 2022, (int(r["q"][-1]) - 1) * 3 + 1, 1)
+        qs = r["qstart"]
         val = _held_at(bets, prices, min(qs + timedelta(days=92), TODAY)) + r["realized_pool"]
         roi = val / r["cap_in"] - 1 if r["cap_in"] else 0
         spy = _spy_at(bets, prices, min(qs + timedelta(days=92), TODAY))
