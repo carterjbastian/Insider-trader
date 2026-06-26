@@ -74,7 +74,13 @@ def email(subject: str, body: str, to=None) -> bool:
         req = urllib.request.Request(
             LOOPS_URL,
             data=payload,
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                # Loops sits behind Cloudflare, which 403s (error 1010) on urllib's default
+                # User-Agent; a named UA clears the bot-signature block.
+                "User-Agent": "blackbox-insider-trader/0.1",
+            },
         )
         try:
             with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
