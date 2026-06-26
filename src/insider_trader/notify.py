@@ -11,13 +11,13 @@ failing the run, so we can wire email the moment the credentials land.
 
 from __future__ import annotations
 
+import json
 import os
-import smtplib
 import urllib.parse
 import urllib.request
-from email.mime.text import MIMEText
 
 CHAT_ID = "8551999515"
+EMAIL_FROM = "carter.bastian1@gmail.com"
 EMAIL_TO = [
     "carter.bastian1@gmail.com",
     "Mdmmmorgan@gmail.com",
@@ -48,24 +48,32 @@ def telegram(text: str) -> bool:
 
 
 def email(subject: str, body: str, to=None) -> bool:
-    host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-    user = os.environ.get("SMTP_USER")
-    pw = os.environ.get("SMTP_PASS")
-    sender = os.environ.get("SMTP_FROM", user or "")
+    """Send via SendGrid's HTTPS API (the droplet blocks outbound SMTP, so we can't use raw mail).
+    Needs SENDGRID_API_KEY + a verified single-sender. Skips gracefully if not configured."""
+    key = os.environ.get("SENDGRID_API_KEY")
+    sender = os.environ.get("EMAIL_FROM", EMAIL_FROM)
     to = to or EMAIL_TO
-    if not (user and pw):
-        print(f"[notify] no SMTP creds — would email {len(to)} recipients: {subject!r}", flush=True)
+    if not key:
+        print(f"[notify] no SENDGRID_API_KEY — would email {len(to)}: {subject!r}", flush=True)
         return False
-    msg = MIMEText(body)
-    msg["Subject"], msg["From"], msg["To"] = subject, sender, ", ".join(to)
+    payload = json.dumps(
+        {
+            "personalizations": [{"to": [{"email": e} for e in to]}],
+            "from": {"email": sender, "name": "Insider Trader"},
+            "subject": subject,
+            "content": [{"type": "text/plain", "value": body}],
+        }
+    ).encode()
+    req = urllib.request.Request(
+        "https://api.sendgrid.com/v3/mail/send",
+        data=payload,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
     try:
-        with smtplib.SMTP(host, int(os.environ.get("SMTP_PORT", "587")), timeout=30) as s:
-            s.starttls()
-            s.login(user, pw)
-            s.sendmail(sender, to, msg.as_string())
-        return True
+        with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
+            return r.status in (200, 201, 202)
     except Exception as e:  # noqa: BLE001
-        print(f"[notify] email failed: {type(e).__name__}: {e}", flush=True)
+        print(f"[notify] sendgrid failed: {type(e).__name__}: {e}", flush=True)
         return False
 
 
