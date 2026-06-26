@@ -4,9 +4,10 @@
   Channel 2 — friends email: ONLY when there's a buy/sell, to the distribution list, with the
               signal details, instructions, a portfolio overview, and a not-advice disclaimer.
 
-Telegram uses TELEGRAM_BOT_TOKEN + CHAT_ID. Email uses the SendGrid HTTPS API (SENDGRID_API_KEY)
-because the droplet blocks outbound SMTP; if the key is absent the email step logs and skips
-rather than failing the run, so it wires up the moment the key lands.
+Telegram uses TELEGRAM_BOT_TOKEN + CHAT_ID. Email uses the Loops transactional HTTPS API
+(LOOPS_API_KEY + LOOPS_TRANSACTIONAL_ID, reusing forkbeard's Loops account) because the droplet
+blocks outbound SMTP; if either is absent the email step logs and skips rather than failing the
+run, so it wires up the moment the creds land.
 """
 
 from __future__ import annotations
@@ -47,34 +48,41 @@ def telegram(text: str) -> bool:
         return False
 
 
+LOOPS_URL = "https://app.loops.so/api/v1/transactional"
+
+
 def email(subject: str, body: str, to=None) -> bool:
-    """Send via SendGrid's HTTPS API (the droplet blocks outbound SMTP, so we can't use raw mail).
-    Needs SENDGRID_API_KEY + a verified single-sender. Skips gracefully if not configured."""
-    key = os.environ.get("SENDGRID_API_KEY")
-    sender = os.environ.get("EMAIL_FROM", EMAIL_FROM)
+    """Send via Loops' transactional HTTPS API (reuses forkbeard's Loops account; the droplet
+    blocks SMTP). Loops needs a pre-made transactional TEMPLATE (LOOPS_TRANSACTIONAL_ID) with
+    `subject` + `body` data variables; we send it 1:1 to each recipient. Skips if unconfigured."""
+    key = os.environ.get("LOOPS_API_KEY")
+    tid = os.environ.get("LOOPS_TRANSACTIONAL_ID")
     to = to or EMAIL_TO
-    if not key:
-        print(f"[notify] no SENDGRID_API_KEY — would email {len(to)}: {subject!r}", flush=True)
+    if not (key and tid):
+        miss = "LOOPS_API_KEY" if not key else "LOOPS_TRANSACTIONAL_ID"
+        print(f"[notify] no {miss} — would email {len(to)}: {subject!r}", flush=True)
         return False
-    payload = json.dumps(
-        {
-            "personalizations": [{"to": [{"email": e} for e in to]}],
-            "from": {"email": sender, "name": "Insider Trader"},
-            "subject": subject,
-            "content": [{"type": "text/plain", "value": body}],
-        }
-    ).encode()
-    req = urllib.request.Request(
-        "https://api.sendgrid.com/v3/mail/send",
-        data=payload,
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
-            return r.status in (200, 201, 202)
-    except Exception as e:  # noqa: BLE001
-        print(f"[notify] sendgrid failed: {type(e).__name__}: {e}", flush=True)
-        return False
+    ok = 0
+    for addr in to:
+        payload = json.dumps(
+            {
+                "transactionalId": tid,
+                "email": addr,
+                "dataVariables": {"subject": subject, "body": body},
+            }
+        ).encode()
+        req = urllib.request.Request(
+            LOOPS_URL,
+            data=payload,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
+                ok += r.status in (200, 201, 202)
+        except Exception as e:  # noqa: BLE001
+            print(f"[notify] loops failed for {addr}: {type(e).__name__}: {e}", flush=True)
+    print(f"[notify] emailed {ok}/{len(to)} via Loops", flush=True)
+    return ok > 0
 
 
 def _tier_label(t):

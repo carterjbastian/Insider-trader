@@ -47,12 +47,12 @@ CREATE TABLE IF NOT EXISTS signals (
 # --- step 2: incremental trade ingest ---------------------------------------
 
 
-def pull_house(conn, years) -> int:
-    """Fetch + store only House PTRs we don't already have (current/prior year for late filings)."""
+def pull_house(conn, years):
+    """Fetch + store only House PTRs we don't already have. Returns (n_new, [filing dicts])."""
     with conn.cursor() as cur:
         cur.execute("SELECT doc_id FROM filings")
         have = {r[0] for r in cur.fetchall()}
-    n = 0
+    new = []
     for year in years:
         try:
             filings = house.ptrs(year)
@@ -69,19 +69,27 @@ def pull_house(conn, years) -> int:
                 txns = []
             store.save_filing(conn, f, bool(txns), len(txns))
             store.replace_transactions(conn, f.doc_id, txns)
-            n += 1
-    return n
+            new.append(
+                {
+                    "member": f"{f.first} {f.last}".strip(),
+                    "url": f"{house.BASE}/ptr-pdfs/{f.year}/{f.doc_id}.pdf",
+                    "n": len(txns),
+                }
+            )
+    return len(new), new
 
 
-def pull_senate(years) -> int:
-    """Incremental Senate pull — senate.ingest is idempotent and manages its own connection."""
-    total = 0
+def pull_senate(years):
+    """Incremental Senate pull (manages own connection). Returns (n_new_txns, [filing dicts])."""
+    total, new = 0, []
     for year in years:
         try:
-            total += senate.ingest(year, year).get("transactions", 0)
+            r = senate.ingest(year, year)
+            total += r.get("transactions", 0)
+            new += r.get("new_docs", [])
         except Exception as e:  # noqa: BLE001
             print(f"  ! senate {year}: {type(e).__name__}: {e}", flush=True)
-    return total
+    return total, new
 
 
 # --- step 5: new BUY signals ------------------------------------------------
@@ -175,55 +183,129 @@ def refresh_profiles(conn, max_age_days=183):
     return len(stale)
 
 
-def run(dry_run: bool = False) -> dict:
-    y = date.today().year
-    years = [y - 1, y]  # current + prior year (late/amended filings)
-    # Each step uses a SHORT-LIVED connection and closes it before the next (slow) network step,
-    # so nothing sits idle-in-transaction across the ~5-min pulls (Neon kills those after ~5 min).
-    print("[daily] 1. refreshing roster...", flush=True)
-    conn = store.connect()
-    roster = members.enrich(conn)
-    conn.close()
-    print(f"   matched {roster['matched']}/{roster['filers']} filers", flush=True)
+RUNLOG = "/home/carter/vault/Scratchpad/Ingests/Insider Trader Run Log.md"
+_TIER_LABEL = {1: "$50", 2: "$100", 3: "$100 + 1yr ATM calls"}
 
-    print("[daily] 2. pulling new trades...", flush=True)
-    conn = store.connect()
-    nh = pull_house(conn, years)
-    conn.close()  # close before the slow Senate pull so this conn can't go stale
-    ns = pull_senate(years)  # manages its own connection
-    print(f"   +{nh} House filings, +{ns} Senate txns", flush=True)
 
-    print("[daily] 3. enriching sectors...", flush=True)
-    conn = store.connect()
-    securities.enrich(conn)
-    conn.close()
+def _pt_now():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
-    print("[daily] 4. recomputing trader_metrics + returns...", flush=True)
-    metrics.run()
+    return datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d %I:%M %p PT")
 
-    print("[daily] 5. Phase-1 -> Phase-2 on new disclosures...", flush=True)
-    conn = store.connect()
-    buys = new_buy_signals(conn)
 
-    print("[daily] 6. updating paper portfolio...", flush=True)
-    pr = paper.run(conn)
-    sells, port = pr["sells"], pr["port"]
-    print(f"   {len(buys)} buys, {len(sells)} sells | portfolio ${port['total']:,.0f}", flush=True)
+def _append_runlog(text: str) -> None:
+    """Append-only — never rewrites or deletes prior entries (orchestrator trims separately)."""
+    with open(RUNLOG, "a") as f:
+        f.write(text + "\n")
 
-    print("[daily] 7. broadcasting...", flush=True)
-    stats = {"date": date.today().isoformat(), "house": nh, "senate": ns, "candidates": len(buys)}
-    summary = notify.run_summary(stats, buys, sells, port)
-    print(summary, flush=True)
-    if not dry_run:
-        notify.telegram(summary)  # Channel 1: personal, every run
-        if buys or sells:  # Channel 2: friends email, only on a signal
-            kinds = "/".join(filter(None, ["Buy" if buys else "", "Sell" if sells else ""]))
-            notify.email(
-                f"Insider Trader: New {kinds} Signal/s ({date.today().isoformat()})",
-                notify.signal_email_body(buys, sells, port),
+
+def _log_success(stamp, new_filings, buys, sells, tg_ok, em_ok):
+    L = [f"\n## {stamp} — ✅ completed"]
+    if new_filings:
+        L.append(f"- **New trades scraped:** {len(new_filings)} filing(s):")
+        for d in new_filings[:40]:
+            L.append(f"  - {d['member']} ({d['n']} txns) — [source]({d['url']})")
+    else:
+        L.append("- **New trades scraped:** 0")
+    if buys:
+        L.append("- **BUY signals:**")
+        for b in buys:
+            L.append(
+                f"  - {b['ticker']} (copy {b['member']}) — Phase-1: run-up "
+                f"{b['runup'] * 100:+.0f}%; Phase-2: signal {b['signal']} → "
+                f"**tier {b['tier']} ({_TIER_LABEL[b['tier']]})**"
             )
-    conn.close()
-    return {"house": nh, "senate": ns, "buys": len(buys), "sells": len(sells)}
+    if sells:
+        L.append("- **SELL signals:**")
+        L += [f"  - {s['ticker']} (copy {s['member']})" for s in sells]
+    if not buys and not sells:
+        L.append("- **Signals:** none")
+    acts = [f"BUY {b['ticker']} {_TIER_LABEL[b['tier']]}" for b in buys] + [
+        f"SELL {s['ticker']}" for s in sells
+    ]
+    L.append(f"- **Action items:** {'; '.join(acts) if acts else 'none'}")
+    em = "Y" if em_ok else ("N/A (no signals)" if not (buys or sells) else "N")
+    L.append(f"- **Telegram sent:** {'Y' if tg_ok else 'N'}  |  **Email sent:** {em}")
+    _append_runlog("\n".join(L))
+
+
+def run(dry_run: bool = False) -> dict:
+    stamp = _pt_now()
+    new_filings = []
+    try:
+        y = date.today().year
+        years = [y - 1, y]  # current + prior year (late/amended filings)
+        # Short-lived connection per step, closed before each slow network step, so nothing sits
+        # idle-in-transaction across the ~5-min pulls (Neon kills idle-in-tx conns after ~5 min).
+        print("[daily] 1. refreshing roster...", flush=True)
+        conn = store.connect()
+        roster = members.enrich(conn)
+        conn.close()
+        print(f"   matched {roster['matched']}/{roster['filers']} filers", flush=True)
+
+        print("[daily] 2. pulling new trades...", flush=True)
+        conn = store.connect()
+        nh, house_new = pull_house(conn, years)
+        conn.close()  # close before the slow Senate pull so this conn can't go stale
+        ns, senate_new = pull_senate(years)  # manages its own connection
+        new_filings = house_new + senate_new
+        print(f"   +{nh} House filings, +{ns} Senate txns", flush=True)
+
+        print("[daily] 3. enriching sectors...", flush=True)
+        conn = store.connect()
+        securities.enrich(conn)
+        conn.close()
+
+        print("[daily] 4. recomputing trader_metrics + returns...", flush=True)
+        metrics.run()
+
+        print("[daily] 5. Phase-1 -> Phase-2 on new disclosures...", flush=True)
+        conn = store.connect()
+        buys = new_buy_signals(conn)
+
+        print("[daily] 6. updating paper portfolio...", flush=True)
+        pr = paper.run(conn)
+        sells, port = pr["sells"], pr["port"]
+        conn.close()
+        print(
+            f"   {len(buys)} buys, {len(sells)} sells | portfolio ${port['total']:,.0f}", flush=True
+        )
+
+        print("[daily] 7. broadcasting...", flush=True)
+        stats = {
+            "date": date.today().isoformat(),
+            "house": nh,
+            "senate": ns,
+            "candidates": len(buys),
+        }
+        summary = notify.run_summary(stats, buys, sells, port)
+        print(summary, flush=True)
+        tg_ok = em_ok = False
+        if not dry_run:
+            tg_ok = notify.telegram(summary)  # Channel 1: personal, every run
+            if buys or sells:  # Channel 2: friends email, only on a signal
+                kinds = "/".join(filter(None, ["Buy" if buys else "", "Sell" if sells else ""]))
+                em_ok = notify.email(
+                    f"Insider Trader: New {kinds} Signal/s ({date.today().isoformat()})",
+                    notify.signal_email_body(buys, sells, port),
+                )
+        _log_success(stamp, new_filings, buys, sells, tg_ok, em_ok)
+        return {"house": nh, "senate": ns, "buys": len(buys), "sells": len(sells)}
+    except Exception as e:  # noqa: BLE001 — never fail quietly: log + alert, then re-raise
+        err = f"{type(e).__name__}: {e}"
+        print(f"[daily] FAILED: {err}", flush=True)
+        _append_runlog(
+            f"\n## {stamp} — ❌ FAILED\n- **Error:** {err}\n"
+            f"- **New trades scraped before failure:** {len(new_filings)}\n"
+            "- **Action item:** DEBUG + RERUN the daily job.\n"
+            "- **Telegram sent:** Y (failure alert)"
+        )
+        if not dry_run:
+            notify.telegram(
+                f"❌ Insider Trader daily run FAILED ({stamp})\n{err}\n→ Action: debug + rerun."
+            )
+        raise
 
 
 if __name__ == "__main__":

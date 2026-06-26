@@ -2,7 +2,7 @@
 Description=Run the Insider Trader daily job each morning
 
 [Timer]
-OnCalendar=*-*-* 11:00:00 UTC
+OnCalendar=*-*-* 06:15:00 America/Los_Angeles
 Persistent=true
 
 [Install]

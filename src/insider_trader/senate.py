@@ -181,6 +181,7 @@ def ingest(start_year: int, end_year: int) -> dict:
     conn.commit()
     op, csrf = _authed()
     grand_f = grand_t = grand_skip = 0
+    new_docs = []  # newly-ingested filings (for the run log)
     for year in range(start_year, end_year + 1):
         for q in (("01/01", "03/31"), ("04/01", "06/30"), ("07/01", "09/30"), ("10/01", "12/31")):
             start, end = f"{q[0]}/{year}", f"{q[1]}/{year}"
@@ -197,12 +198,15 @@ def ingest(start_year: int, end_year: int) -> dict:
                 _save_filing(conn, doc_id, first, last, disc, year, bool(txns), len(txns))
                 store.replace_transactions(conn, doc_id, txns)
                 grand_t += len(txns)
+                new_docs.append(
+                    {"member": f"{first} {last}".strip(), "url": BASE + url, "n": len(txns)}
+                )
                 time.sleep(0.3)  # be a polite gated-source citizen
             grand_f += len(ptrs)
             print(f"  {start}..{end}: {len(ptrs)} PTRs", flush=True)
     conn.close()
     print(f"TOTAL: {grand_f} Senate PTRs ({grand_skip} already had) -> {grand_t} new transactions")
-    return {"ptrs": grand_f, "transactions": grand_t, "skipped": grand_skip}
+    return {"ptrs": grand_f, "transactions": grand_t, "skipped": grand_skip, "new_docs": new_docs}
 
 
 if __name__ == "__main__":
