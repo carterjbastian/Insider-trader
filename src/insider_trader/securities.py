@@ -59,7 +59,11 @@ def enrich(conn, limit: int | None = None, pause: float = 0.4) -> dict:
         conn.commit()
         cur.execute("SELECT DISTINCT ticker FROM transactions WHERE ticker IS NOT NULL")
         tickers = {r[0] for r in cur.fetchall()}
-        cur.execute("SELECT ticker FROM securities WHERE ok")  # already resolved
+        # skip resolved tickers AND ones attempted recently (so a daily job doesn't re-hit the
+        # ~1k junk/non-equity tickers every run; failures get retried only monthly).
+        cur.execute(
+            "SELECT ticker FROM securities WHERE ok OR fetched_at > now() - interval '30 days'"
+        )
         done = {r[0] for r in cur.fetchall()}
 
     todo = sorted(tickers - done)
