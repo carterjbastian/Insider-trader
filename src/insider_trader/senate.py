@@ -176,14 +176,19 @@ def ingest(start_year: int, end_year: int) -> dict:
     conn = store.connect()
     with conn.cursor() as cur:
         cur.execute(_CHAMBER_DDL)
+        cur.execute("SELECT doc_id FROM filings WHERE chamber='senate' AND parsed")
+        have = {r[0] for r in cur.fetchall()}  # skip already-parsed (incremental + polite)
     conn.commit()
     op, csrf = _authed()
-    grand_f = grand_t = 0
+    grand_f = grand_t = grand_skip = 0
     for year in range(start_year, end_year + 1):
         for q in (("01/01", "03/31"), ("04/01", "06/30"), ("07/01", "09/30"), ("10/01", "12/31")):
             start, end = f"{q[0]}/{year}", f"{q[1]}/{year}"
             ptrs = list(iter_ptrs(op, csrf, start, end))
             for first, last, doc_id, url, disc in ptrs:
+                if doc_id in have:
+                    grand_skip += 1
+                    continue
                 try:
                     txns = parse_ptr(op, doc_id, url, disc)
                 except Exception as e:  # noqa: BLE001
@@ -196,8 +201,8 @@ def ingest(start_year: int, end_year: int) -> dict:
             grand_f += len(ptrs)
             print(f"  {start}..{end}: {len(ptrs)} PTRs", flush=True)
     conn.close()
-    print(f"TOTAL: {grand_f} Senate PTRs -> {grand_t} transactions")
-    return {"ptrs": grand_f, "transactions": grand_t}
+    print(f"TOTAL: {grand_f} Senate PTRs ({grand_skip} already had) -> {grand_t} new transactions")
+    return {"ptrs": grand_f, "transactions": grand_t, "skipped": grand_skip}
 
 
 if __name__ == "__main__":
