@@ -288,10 +288,25 @@ def apply_sells(conn, today, prices):
 # --- valuation + render -----------------------------------------------------
 
 
-def _mark(ser, kind, qty, strike):
+def _occ_symbol(ticker, expiry, strike):
+    exp = expiry.strftime("%y%m%d")
+    return f"O:{ticker}{exp}C{int(round(strike * 1000)):08d}"
+
+
+def _option_market_price(ticker, expiry, strike, fallback):
+    """Current market price of an open call from Polygon (latest daily close); fallback = entry."""
+    try:
+        bars = po.daily_bars(
+            _occ_symbol(ticker, expiry, strike), date.today() - timedelta(days=7), date.today()
+        )
+        return bars[-1]["c"] if bars else fallback
+    except Exception:  # noqa: BLE001
+        return fallback
+
+
+def _mark_equity(ser, qty):
     px = _last(ser)[1] if ser else 0.0
-    val = qty * (max(0.0, px - strike) if kind == "option" else px)
-    return px, val
+    return px, qty * px
 
 
 def snapshot(conn, prices):
@@ -327,9 +342,13 @@ def snapshot(conn, prices):
         for r in cur.fetchall():
             d = dict(zip(cols, r, strict=True))
             if d["status"] == "open":
-                px, val = _mark(
-                    prices.get(d["ticker"]), d["kind"], float(d["qty"]), float(d["strike"] or 0)
-                )
+                if d["kind"] == "option":
+                    px = _option_market_price(
+                        d["ticker"], d["expiry"], float(d["strike"] or 0), float(d["open_price"])
+                    )
+                    val = float(d["qty"]) * px
+                else:
+                    px, val = _mark_equity(prices.get(d["ticker"]), float(d["qty"]))
                 d["mark_price"], d["value"] = px, val
                 held += val
             else:
