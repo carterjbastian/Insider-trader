@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from datetime import date, timedelta
 
-from . import house, members, metrics, phase2, securities, senate, store
+from . import house, members, metrics, notify, paper, phase2, securities, senate, store
 from .phase1_backtest import GROWTH, _on_after, _prices
 
 LOOKBACK_DAYS = 21  # how far back to scan for new locked candidates (covers any seeding gap)
@@ -150,26 +150,7 @@ def new_buy_signals(conn) -> list[dict]:
     return out
 
 
-# --- step 6: stubs for item 3 -----------------------------------------------
-
-
-def sell_signals(conn):  # noqa: ARG001
-    """TODO (item 3): emit sells when the trigger-trader discloses a sale or 18mo elapses."""
-    return []
-
-
-def broadcast(signals):  # noqa: ARG001
-    """TODO (item 3): push to Telegram + email. For now, log only."""
-    for s in signals:
-        print(
-            f"  SIGNAL buy {s['ticker']} by {s['member']} | tier {s['tier']} "
-            f"(signal {s['signal']}, run-up {s['runup'] * 100:+.0f}%)",
-            flush=True,
-        )
-
-
-def update_paper_portfolio(conn, signals):  # noqa: ARG001
-    """TODO (item 3): apply the locked sizing/compounding to a simulated portfolio."""
+# --- profiles refresh (periodic, not every run) -----------------------------
 
 
 def refresh_profiles(conn, max_age_days=183):
@@ -214,12 +195,24 @@ def run(dry_run: bool = False) -> dict:
     print("[daily] 5. Phase-1 -> Phase-2 on new disclosures...", flush=True)
     conn = store.connect()
     buys = new_buy_signals(conn)
-    sells = sell_signals(conn)
-    print(f"   {len(buys)} new buy signals, {len(sells)} sell signals", flush=True)
 
+    print("[daily] 6. updating paper portfolio...", flush=True)
+    pr = paper.run(conn)
+    sells, port = pr["sells"], pr["port"]
+    print(f"   {len(buys)} buys, {len(sells)} sells | portfolio ${port['total']:,.0f}", flush=True)
+
+    print("[daily] 7. broadcasting...", flush=True)
+    stats = {"date": date.today().isoformat(), "house": nh, "senate": ns, "candidates": len(buys)}
+    summary = notify.run_summary(stats, buys, sells, port)
+    print(summary, flush=True)
     if not dry_run:
-        broadcast(buys)
-        update_paper_portfolio(conn, buys + sells)
+        notify.telegram(summary)  # Channel 1: personal, every run
+        if buys or sells:  # Channel 2: friends email, only on a signal
+            kinds = "/".join(filter(None, ["Buy" if buys else "", "Sell" if sells else ""]))
+            notify.email(
+                f"Insider Trader: New {kinds} Signal/s ({date.today().isoformat()})",
+                notify.signal_email_body(buys, sells, port),
+            )
     conn.close()
     return {"house": nh, "senate": ns, "buys": len(buys), "sells": len(sells)}
 
