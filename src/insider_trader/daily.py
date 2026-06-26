@@ -73,8 +73,8 @@ def pull_house(conn, years) -> int:
     return n
 
 
-def pull_senate(conn, years) -> int:
-    """Incremental Senate pull — senate.ingest is idempotent; it skips already-parsed docs."""
+def pull_senate(years) -> int:
+    """Incremental Senate pull — senate.ingest is idempotent and manages its own connection."""
     total = 0
     for year in years:
         try:
@@ -117,6 +117,7 @@ def new_buy_signals(conn) -> list[dict]:
     cands = _new_locked_candidates(conn)
     if not cands:
         return []
+    conn.commit()  # close the read transaction before the (slow) price fetch
     prices = _prices([c["ticker"] for c in cands])
     out = []
     for c in cands:
@@ -177,17 +178,23 @@ def refresh_profiles(conn, max_age_days=183):
 def run(dry_run: bool = False) -> dict:
     y = date.today().year
     years = [y - 1, y]  # current + prior year (late/amended filings)
-    conn = store.connect()
+    # Each step uses a SHORT-LIVED connection and closes it before the next (slow) network step,
+    # so nothing sits idle-in-transaction across the ~5-min pulls (Neon kills those after ~5 min).
     print("[daily] 1. refreshing roster...", flush=True)
+    conn = store.connect()
     roster = members.enrich(conn)
+    conn.close()
     print(f"   matched {roster['matched']}/{roster['filers']} filers", flush=True)
 
     print("[daily] 2. pulling new trades...", flush=True)
+    conn = store.connect()
     nh = pull_house(conn, years)
-    ns = pull_senate(conn, years)
+    conn.close()  # close before the slow Senate pull so this conn can't go stale
+    ns = pull_senate(years)  # manages its own connection
     print(f"   +{nh} House filings, +{ns} Senate txns", flush=True)
 
     print("[daily] 3. enriching sectors...", flush=True)
+    conn = store.connect()
     securities.enrich(conn)
     conn.close()
 
