@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the Insider Trader daily job each morning
+
+[Timer]
+OnCalendar=*-*-* 11:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Insider Trader daily job (ingest -> filter -> signals -> paper -> broadcast)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=carter
+WorkingDirectory=/home/carter/code/insider-trader
+EnvironmentFile=/home/carter/.config/claude-channels/black-box.env
+ExecStart=/home/carter/.local/bin/uv run python -m insider_trader.daily
