@@ -25,7 +25,7 @@ from .final_backtest import _build, _fetch_options, _load
 from .phase1_backtest import _last, _on_after, _prices
 
 _OUT = (
-    "/home/carter/vault/Projects/Black Box/Insider Trader/Backtests/"
+    "/home/carter/vault/Projects/Active/Black Box/Insider Trader/Backtests/"
     "2026-06-25 FINAL Strategy Backtest v2 (sell + compounding).md"
 )
 TODAY = date(2026, 6, 24)

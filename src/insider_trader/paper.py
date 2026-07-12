@@ -19,7 +19,7 @@ from . import polygon_options as po
 from . import store
 from .phase1_backtest import _last, _on_after, _prices
 
-PORTFOLIO_MD = "/home/carter/vault/Projects/Black Box/Insider Trader/Live Paper Portfolio.md"
+PORTFOLIO_MD = "/home/carter/vault/Projects/Active/Black Box/Insider Trader/Live Paper Portfolio.md"
 HOLD_CAP = timedelta(days=548)  # 18 months
 MATCH_FACTOR = 2.0  # locked: pool must cover 2x the projected matching need
 

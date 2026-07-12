@@ -36,7 +36,7 @@ STRATS = [
     ("buy & hold", "hold"),
 ]
 GROWTH = {"Technology", "Basic Materials", "Energy", "Communication Services", "Industrials"}
-_BTDIR = "/home/carter/vault/Projects/Black Box/Insider Trader/Backtests/"
+_BTDIR = "/home/carter/vault/Projects/Active/Black Box/Insider Trader/Backtests/"
 GATES = {
     "exclude-defensive": {
         "desc": "House PURCHASE, tradeable ticker, sector NOT in {Utilities, Real Estate, "

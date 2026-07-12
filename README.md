@@ -11,7 +11,7 @@ chamber: house
 
 Mines **US Congressional stock-trade disclosures** (STOCK Act Periodic Transaction Reports)
 for trades that may ride on non-public information, and follows them. A **Black Box** strategy
-(async, long-horizon). Full design: vault `Projects/Black Box/Specs/05 — Strategy — Insider Trader`.
+(async, long-horizon). Full design: vault `Projects/Active/Black Box/Specs/05 — Strategy — Insider Trader`.
 
 > **Money is real.** `research` only. Signals are advisory; no orders without a gated promotion.
 

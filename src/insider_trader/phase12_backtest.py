@@ -14,7 +14,7 @@ from datetime import datetime
 from . import store
 from .phase1_backtest import GROWTH, TODAY, _last, _on_after, _prices, _resolve_sell
 
-_BTDIR = "/home/carter/vault/Projects/Black Box/Insider Trader/Backtests/"
+_BTDIR = "/home/carter/vault/Projects/Active/Black Box/Insider Trader/Backtests/"
 _OUT = _BTDIR + "2026-06-25 Phase 1+2 Combined Backtest.md"
 SELL = [("1-year", 360), ("sell-when-trader-sells", "trader"), ("buy & hold", "hold")]
 LOCKED_RUNUP = 0.05

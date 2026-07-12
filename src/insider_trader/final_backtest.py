@@ -25,7 +25,7 @@ from . import store
 from .phase1_backtest import GROWTH, TODAY, _last, _on_after, _prices, _resolve_sell
 
 _OUT = (
-    "/home/carter/vault/Projects/Black Box/Insider Trader/Backtests/"
+    "/home/carter/vault/Projects/Active/Black Box/Insider Trader/Backtests/"
     "2026-06-25 FINAL Buy Strategy Backtest.md"
 )
 START = date(2022, 1, 1)

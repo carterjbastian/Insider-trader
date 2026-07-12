@@ -21,7 +21,7 @@ from .phase1_backtest import TODAY, _last, _on_after, _prices
 from .phase12_backtest import _load
 
 _OUT = (
-    "/home/carter/vault/Projects/Black Box/Insider Trader/Backtests/"
+    "/home/carter/vault/Projects/Active/Black Box/Insider Trader/Backtests/"
     "2026-06-25 Phase 1+2 Options Amplification.md"
 )
 LOCKED_RUNUP = 0.05

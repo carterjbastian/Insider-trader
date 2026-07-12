@@ -15,7 +15,7 @@ from . import store
 from .signals import _auc
 
 WIN = 0.5  # "winner" = beat SPY by >= +50% over 360d (exc_360)
-_OUT = "/home/carter/vault/Projects/Black Box/Insider Trader/Backtests/2026-06-25 Phase 2 Signal Evaluation.md"
+_OUT = "/home/carter/vault/Projects/Active/Black Box/Insider Trader/Backtests/2026-06-25 Phase 2 Signal Evaluation.md"
 
 
 def _load(conn) -> list[dict]:

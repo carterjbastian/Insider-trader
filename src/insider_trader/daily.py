@@ -183,7 +183,7 @@ def refresh_profiles(conn, max_age_days=183):
     return len(stale)
 
 
-RUNLOG = "/home/carter/vault/Scratchpad/Ingests/Insider Trader Run Log.md"
+RUNLOG = "/home/carter/vault/Backlog/Ingests/Insider Trader Run Log.md"
 _TIER_LABEL = {1: "$50", 2: "$100", 3: "$100 + 1yr ATM calls"}
 
 
