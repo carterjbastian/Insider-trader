@@ -120,7 +120,9 @@ def _fetch_options(bets):
         spot = po.unadjusted_spot(b["ticker"], b["buy_date"], b["buy_close"], splits[b["ticker"]])
         b["opt"] = None
         if spot:
-            res = po.option_premium_path(b["ticker"], b["buy_date"], spot, target_dte=365)
+            res = po.option_premium_path(
+                b["ticker"], b["buy_date"], spot, target_dte=365, end=po.BACKTEST_END
+            )
             if res and res.get("entry_premium") and res.get("last_close"):
                 entry = res["entry_premium"]
                 ncon = max(1, math.ceil(100 / entry))

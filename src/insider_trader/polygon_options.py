@@ -20,6 +20,13 @@ from datetime import date, datetime, timedelta
 
 BASE = "https://api.polygon.io"
 DATA_START = date(2022, 1, 1)  # Developer-tier options history floor (probed 2026-06-25)
+# NOTE: on the ~$30 Starter tier the floor is instead a ROLLING ~2 years, so dates older than
+# ~today-2yr return empty bars (pick_call still succeeds, option_premium_path returns None).
+# Backtests needing 2022+ depend on Developer or on the local export (see export_option_history).
+
+BACKTEST_END = date(2026, 6, 24)  # frozen data cutoff of the LOCKED backtests — do not change:
+# every backtest report in the vault was produced with it. Backtest callers pass end=BACKTEST_END
+# for reproducibility; the live/paper path must use the default (today).
 
 
 def _key() -> str:
@@ -122,15 +129,21 @@ def _bar_on_after(bars: list[dict], d: date) -> float | None:
     return min(cand, key=lambda b: b["t"])["c"] if cand else None
 
 
-def option_premium_path(ticker: str, buy_date, spot: float, target_dte: int = 365) -> dict | None:
+def option_premium_path(
+    ticker: str, buy_date, spot: float, target_dte: int = 365, end=None
+) -> dict | None:
     """Pick the call, fetch its bars, return entry premium + exit value (real if expired-and-traded,
-    else None for exit so the caller can fall back to intrinsic from the underlying)."""
+    else None for exit so the caller can fall back to intrinsic from the underlying).
+
+    `end` caps the bar range. Defaults to TODAY — correct for the live/paper path. Backtests must
+    pass end=BACKTEST_END to stay reproducible against the locked reports.
+    """
     pick = pick_call(ticker, buy_date, spot, target_dte)
     if not pick:
         return None
     buy_date = _d(buy_date)
     exp = _d(pick["expiration"])
-    bars = daily_bars(pick["contract"], buy_date, min(exp, date(2026, 6, 24)))
+    bars = daily_bars(pick["contract"], buy_date, min(exp, _d(end) if end else date.today()))
     entry = _bar_on_after(bars, buy_date)
     if not entry:
         return None

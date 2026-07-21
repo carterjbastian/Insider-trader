@@ -82,7 +82,7 @@ def _fetch_options(bets, min_signal=50):
             continue
         for label, (otm, dte) in STRUCTURES.items():
             res = po.option_premium_path(
-                b["ticker"], b["buy_date"], spot * (1 + otm), target_dte=dte
+                b["ticker"], b["buy_date"], spot * (1 + otm), target_dte=dte, end=po.BACKTEST_END
             )
             if res and res.get("last_close") and res.get("entry_premium"):
                 exp = datetime.strptime(res["expiration"], "%Y-%m-%d").date()
